@@ -20,6 +20,7 @@ from inspect_robots._setup import (
     _ambiguous_identities,
     _camera_inventory,
     _camera_rows,
+    _camera_view_state,
     _CameraNode,
     _can_kernels,
     _can_serial,
@@ -5194,3 +5195,132 @@ def test_render_config_managed_policy_args_missing_from_policy_args() -> None:
     )
     assert "[policy.args]" not in rendered
     assert "[empty_section]" not in rendered
+
+
+def test_camera_view_state_suppresses_toggle_when_rows_are_identical() -> None:
+    inv = [
+        _CameraNode(
+            node="/dev/video0",
+            camera="/sys/devices/pci/usb1/1-1",
+            serial=None,
+            by_id=None,
+            by_path="/dev/v4l/by-path/cam1",
+        )
+    ]
+    # When by_id_rows and by_path_rows match exactly, toggle 'p' should be suppressed
+    # even when inventory has missing by-id names that would otherwise advertise it
+    active_is_by_id, advertise_toggle = _camera_view_state(
+        inv, ["/dev/v4l/by-path/cam1"], ["/dev/v4l/by-path/cam1"]
+    )
+    assert active_is_by_id is False
+    assert advertise_toggle is False
+
+
+def test_prompt_device_slot_detects_duplicate_across_by_id_and_by_path() -> None:
+    inventory = [
+        _CameraNode(
+            node="/dev/video0",
+            camera="/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1",
+            serial="SN123",
+            by_id="/dev/v4l/by-id/usb-Cam_123-video-index0",
+            by_path="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0",
+        )
+    ]
+    by_id_dir = Path("/dev/v4l/by-id")
+    by_path_dir = Path("/dev/v4l/by-path")
+    assigned = {"top_cam_device": ("v4l2", "top", "/dev/v4l/by-id/usb-Cam_123-video-index0")}
+
+    # User attempts to assign the by-path path of the SAME camera to the left camera role
+    by_path_val = "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0"
+    input_fn, _prompts = _scripted_input([by_path_val, "n", "s"])
+    out = io.StringIO()
+
+    res, _ = _prompt_device_slot(
+        "left camera",
+        "v4l2",
+        ["/dev/v4l/by-id/usb-Cam_123-video-index0"],
+        [by_path_val],
+        True,
+        by_id_dir,
+        by_path_dir,
+        None,
+        assigned,
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _b: None,
+        camera_role="left",
+    )
+    assert res is None
+    assert "already assigned to the top camera" in out.getvalue()
+
+
+def test_prompt_device_slot_u_rescan_rebuilds_and_reprints_on_row_change() -> None:
+    inventory = [
+        _CameraNode(
+            node="/dev/video0",
+            camera="/sys/devices/pci/usb1/1-1",
+            serial="SN1",
+            by_id="/dev/v4l/by-id/cam1",
+            by_path="/dev/v4l/by-path/cam1",
+        )
+    ]
+    by_id_dir = Path("/dev/v4l/by-id")
+    by_path_dir = Path("/dev/v4l/by-path")
+    by_id_rows = ["/dev/v4l/by-id/cam1"]
+    by_path_rows = ["/dev/v4l/by-path/cam1"]
+
+    # When rescan returns unchanged rows, listing is not reprinted
+    input_fn, _prompts = _scripted_input(["u"])
+    out = io.StringIO()
+    _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_rows,
+        by_path_rows,
+        True,
+        by_id_dir,
+        by_path_dir,
+        None,
+        {},
+        False,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _b: "/dev/v4l/by-id/cam1",
+        rescan_inventory=lambda: list(inventory),
+    )
+    assert "[1] cam1" not in out.getvalue()
+
+    # When rescan returns changed rows, rows are rebuilt and listing is reprinted
+    new_node = _CameraNode(
+        node="/dev/video1",
+        camera="/sys/devices/pci/usb1/1-2",
+        serial="SN2",
+        by_id="/dev/v4l/by-id/cam2",
+        by_path="/dev/v4l/by-path/cam2",
+    )
+    input_fn, _prompts = _scripted_input(["u"])
+    out = io.StringIO()
+    selected, _ = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_rows,
+        by_path_rows,
+        True,
+        by_id_dir,
+        by_path_dir,
+        None,
+        {},
+        False,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _b: "/dev/v4l/by-id/cam2",
+        rescan_inventory=lambda: [inventory[0], new_node],
+    )
+    assert selected == "/dev/v4l/by-id/cam2"
+    assert len(by_id_rows) == 2
+    assert "/dev/v4l/by-id/cam2" in by_id_rows
+    assert "cam2" in out.getvalue()
