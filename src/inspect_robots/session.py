@@ -56,20 +56,42 @@ ECHO_INTERVAL_S = 0.05
 def _flush_stdin_fd() -> None:
     if not sys.stdin.isatty():
         return
+    if sys.platform == "win32":
+        import msvcrt
+
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+        return
     fd = sys.stdin.fileno()  # pragma: no cover
-    while select.select([fd], [], [], 0)[0]:  # pragma: no cover
-        if not os.read(fd, 65536):  # pragma: no cover
-            break  # pragma: no cover
+    try:
+        while select.select([fd], [], [], 0)[0]:  # pragma: no cover
+            if not os.read(fd, 65536):  # pragma: no cover
+                break  # pragma: no cover
+    except OSError:
+        return
 
 
 def _stdin_read_bytes() -> bytes:
     """Read up to 64KiB of raw stdin without decoding (the footer pump's default fd seam)."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        bytes_list = []
+        while msvcrt.kbhit():
+            b = msvcrt.getch()
+            if b == b"\r":
+                b = b"\n"
+            bytes_list.append(b)
+        return b"".join(bytes_list)
     return os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
 
 
 def _enter_cbreak() -> object:
     """Enter stdin cbreak mode without echo and return the exact attributes to restore."""
-    import termios  # pragma: no cover
+    try:
+        import termios  # pragma: no cover
+    except ImportError:
+        return _NO_TERMIOS_STATE
 
     fd = sys.stdin.fileno()  # pragma: no cover
     saved = termios.tcgetattr(fd)  # pragma: no cover
@@ -84,7 +106,12 @@ def _enter_cbreak() -> object:
 
 def _restore(state: object) -> None:
     """Restore one exact termios snapshot returned by ``_enter_cbreak``."""
-    import termios  # pragma: no cover
+    if state is _NO_TERMIOS_STATE:
+        return
+    try:
+        import termios  # pragma: no cover
+    except ImportError:
+        return
 
     fd, attrs = cast(tuple[int, list[Any]], state)  # pragma: no cover
     termios.tcsetattr(fd, termios.TCSANOW, attrs)  # pragma: no cover
