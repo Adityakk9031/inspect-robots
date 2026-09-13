@@ -2034,9 +2034,7 @@ def _cmd_inspect(
         print(f"  {name}: {_format_metric(value)}")
     print("scenes:")
     for scene in log.samples:
-        reduced = "  ".join(
-            f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items())
-        )
+        reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))
         step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
         details = [reduced] if reduced else []
         if step_limit_count:
