@@ -32,6 +32,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Agent plugin (0.26.0):** Transcript paths are now sanitised; wire-capture
+  directories are renamed to share the same stem as `transcripts/` and
+  `actions/` ([#370](https://github.com/robocurve/inspect-robots/issues/370)).
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
