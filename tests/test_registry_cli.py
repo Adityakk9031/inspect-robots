@@ -277,6 +277,35 @@ def test_cli_live_sink_order_flag_eval_set_threading_and_agent_tip(
         assert "each agent turn, notes, and operator/voice input, updating live" in out
 
 
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_closes_closable_policy_on_exit(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import ScriptedPolicy
+
+    closed = []
+
+    class _ClosablePolicy(ScriptedPolicy):
+        def close(self) -> None:
+            closed.append("closed")
+
+    monkeypatch.setitem(reg._FACTORIES["policy"], "closable", _ClosablePolicy)
+    log = _step_limit_log(task="cubepick-reach", reasons=("success",))
+    monkeypatch.setattr(inspect_robots, "eval", lambda *a, **kw: [log])
+    monkeypatch.setattr(inspect_robots, "eval_set", lambda *a, **kw: (True, [log]))
+
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "closable", "--embodiment", "cubepick", "--log-dir", str(tmp_path)])
+
+    assert main(argv) == 0
+    assert closed == ["closed"]
+
+
 @pytest.mark.parametrize(
     ("env", "platform", "expected"),
     [

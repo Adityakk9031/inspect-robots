@@ -26,7 +26,8 @@ from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
-from inspect_robots.registry import embodiment as embodiment_decorator, policy as policy_decorator
+from inspect_robots.registry import embodiment as embodiment_decorator
+from inspect_robots.registry import policy as policy_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
@@ -912,7 +913,9 @@ def test_eval_closes_resolved_policy_even_on_failure(tmp_path: Path) -> None:
             super().__init__()
             self.info = EmbodimentInfo(
                 name="incompatible",
-                action_space=Box(shape=(7,), semantics=ActionSemantics("eef_delta_pos", frame="world")),
+                action_space=Box(
+                    shape=(7,), semantics=ActionSemantics("eef_delta_pos", frame="world")
+                ),
                 observation_space=ObservationSpace(),
             )
 
