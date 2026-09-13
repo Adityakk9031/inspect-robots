@@ -333,6 +333,7 @@ def eval(
 
     before_scoring = _grading_hook(grader, before_scoring)
     owns_embodiment = isinstance(embodiment, str)
+    owns_policy = isinstance(policy, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
     embodiment = (
@@ -358,10 +359,14 @@ def eval(
             before_scoring=before_scoring,
         )
     finally:
-        # Close what we opened: a registry-resolved embodiment is released even
-        # when the run halts, so a real robot never leaks its connection.
-        if owns_embodiment:
-            embodiment.close()
+        # Close what we opened: a registry-resolved embodiment and policy are released
+        # even when the run halts, so a real robot or policy connection is never leaked.
+        try:
+            if owns_embodiment:
+                embodiment.close()
+        finally:
+            if owns_policy and hasattr(policy, "close") and callable(policy.close):
+                policy.close()
 
 
 def _run_eval(

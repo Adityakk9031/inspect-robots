@@ -1818,7 +1818,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     try:
                         embodiment.close()
                     finally:
-                        resolved.claim.release()
+                        try:
+                            close_policy = getattr(resolved.policy, "close", None)
+                            if callable(close_policy):
+                                close_policy()
+                        finally:
+                            resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     resolved_recording_path = getattr(rerun_sink, "resolved_recording_path", None)
@@ -1966,7 +1971,12 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 try:
                     embodiment.close()
                 finally:
-                    resolved.claim.release()
+                    try:
+                        close_policy = getattr(resolved.policy, "close", None)
+                        if callable(close_policy):
+                            close_policy()
+                    finally:
+                        resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 

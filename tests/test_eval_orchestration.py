@@ -26,7 +26,7 @@ from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
-from inspect_robots.registry import embodiment as embodiment_decorator
+from inspect_robots.registry import embodiment as embodiment_decorator, policy as policy_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
@@ -559,6 +559,16 @@ class _ClosableEmbodiment(CubePickEmbodiment):
 
 embodiment_decorator("closable-cubepick")(_ClosableEmbodiment)
 
+_POLICY_CLOSED: list[str] = []
+
+
+class _ClosablePolicy(ScriptedPolicy):
+    def close(self) -> None:
+        _POLICY_CLOSED.append("closed")
+
+
+policy_decorator("closable-policy")(_ClosablePolicy)
+
 
 def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     """A bind() hook runs after resolution and before compat (plan 0008 §3c).
@@ -878,6 +888,37 @@ def test_eval_closes_resolved_embodiment_even_on_failure(tmp_path: Path) -> None
     with pytest.raises(CompatibilityError):
         eval(_task(), _WidePolicy(), "closable-cubepick", log_dir=str(tmp_path))
     assert _CLOSED == ["closed"]  # released even though the run failed fast
+
+
+def test_eval_closes_string_resolved_policy(tmp_path: Path) -> None:
+    _POLICY_CLOSED.clear()
+    eval(_task(max_steps=5), "closable-policy", CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert _POLICY_CLOSED == ["closed"]
+
+
+def test_eval_does_not_close_caller_owned_policy(tmp_path: Path) -> None:
+    _POLICY_CLOSED.clear()
+    eval(_task(max_steps=5), _ClosablePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert _POLICY_CLOSED == []  # caller owns the object's lifecycle
+
+
+def test_eval_closes_resolved_policy_even_on_failure(tmp_path: Path) -> None:
+    _POLICY_CLOSED.clear()
+    from inspect_robots.embodiment import EmbodimentInfo
+    from inspect_robots.errors import CompatibilityError
+
+    class _IncompatibleEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = EmbodimentInfo(
+                name="incompatible",
+                action_space=Box(shape=(7,), semantics=ActionSemantics("eef_delta_pos", frame="world")),
+                observation_space=ObservationSpace(),
+            )
+
+    with pytest.raises(CompatibilityError):
+        eval(_task(), "closable-policy", _IncompatibleEmbodiment(), log_dir=str(tmp_path))
+    assert _POLICY_CLOSED == ["closed"]  # released even though the run failed fast
 
 
 # --------------------------------------------------------------------------- #
