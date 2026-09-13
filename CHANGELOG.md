@@ -32,6 +32,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** `FrameStore` now caps filename segments derived from scene IDs and
+  camera names at 100 characters plus a hash suffix, preventing OS path
+  overflow while preserving collision resistance and existing filenames under
+  the cap ([#375](https://github.com/robocurve/inspect-robots/pull/375)).
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
