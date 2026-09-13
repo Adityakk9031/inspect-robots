@@ -253,6 +253,7 @@ def test_target_exceeding_bounds_is_clipped_to_box() -> None:
         assert -2.0 <= action.data[1] <= 2.0
     # Final action and cursor must be clamped to bounds
     assert np.allclose(chunk.actions[-1].data, [1.0, -2.0, 1.0])
+    assert motion.cursor is not None
     assert np.allclose(motion.cursor, [1.0, -2.0, 1.0])
 
 
@@ -262,4 +263,5 @@ def test_gripper_exceeding_bounds_is_clipped_to_box() -> None:
     motion._queue_gripper(2.5)  # gripper high is 1.0
     chunk = motion.take_chunk()
     assert np.allclose(chunk.actions[-1].data[2], 1.0)
+    assert motion.cursor is not None
     assert np.allclose(motion.cursor[2], 1.0)
