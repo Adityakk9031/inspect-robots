@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Setup wizard:** `OptionSlot` can now dynamically compute its suggested
+  default from carried `[embodiment.args]` via an optional `suggest` callback
+  ([#303](https://github.com/robocurve/inspect-robots/issues/303)).
+
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
   ([plan 0081](plans/0081-number-slots.md),
