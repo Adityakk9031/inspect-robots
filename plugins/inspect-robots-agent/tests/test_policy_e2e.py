@@ -2831,7 +2831,7 @@ def test_non_string_params_rejected(param: str, val: Any) -> None:
 def test_bind_task_adds_step_budget_to_prompt_and_observation(capsys: pytest.CaptureFixture[str]) -> None:
     from inspect_robots.task import TaskEnvelope
 
-    policy = _policy(_Script([_tool_response("done", {"summary": "done"})]))
+    policy = _policy(_Script([_tool_response("done", {"summary": "done"})]), transcript_echo=True)
     policy.bind(CubePickEmbodiment().info)
     policy.bind_task(TaskEnvelope(name="test_task", max_steps=200))
     policy.reset(Scene(id="s0", instruction="reach"))
@@ -2840,6 +2840,7 @@ def test_bind_task_adds_step_budget_to_prompt_and_observation(capsys: pytest.Cap
     assert transcript is not None
     assert "Environment step budget:" in transcript[0]["content"]
     assert "You have 200 environment steps" in transcript[0]["content"]
+    assert "Pace yourself against the environment step budget" in transcript[0]["content"]
 
     obs = Observation(
         state={"eef_pos": np.zeros(3)},
@@ -2849,7 +2850,7 @@ def test_bind_task_adds_step_budget_to_prompt_and_observation(capsys: pytest.Cap
     # act will build observation content with step budget
     policy.act(obs)
     captured = capsys.readouterr()
-    assert "step 10/200" in captured.out
+    assert "step 10/200" in captured.err
     after_act = policy.transcript()
     assert after_act is not None
     user_msg = after_act[2]["content"]

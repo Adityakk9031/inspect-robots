@@ -1530,3 +1530,15 @@ def test_policy_bind_task_hook_receives_task_envelope(tmp_path: Path) -> None:
     eval(_task(max_steps=42), pol, CubePickEmbodiment(), log_dir=str(tmp_path))
     assert pol.bound_envelope is not None
     assert getattr(pol.bound_envelope, "max_steps", None) == 42
+
+
+def test_policy_base_bind_task_noop() -> None:
+    from inspect_robots.policy import PolicyBase
+    from inspect_robots.task import TaskEnvelope
+
+    class _ConcretePolicy(PolicyBase):
+        def act(self, observation: Observation) -> ActionChunk:
+            raise NotImplementedError
+
+    pol = _ConcretePolicy()
+    pol.bind_task(TaskEnvelope(name="t", max_steps=10))

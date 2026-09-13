@@ -408,7 +408,7 @@ def _run_eval(
     if callable(bind_task):
         bind_task(task_envelope)
 
-    # Horizon-aware policies: optional bind_task() hook
+    # Horizon-aware policies (plan 0013 anticipated this): optional bind_task() hook
     policy_bind_task = getattr(policy, "bind_task", None)
     if callable(policy_bind_task):
         policy_bind_task(task_envelope)

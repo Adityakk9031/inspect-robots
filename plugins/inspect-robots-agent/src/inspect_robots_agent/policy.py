@@ -792,7 +792,9 @@ class LLMAgentPolicy(PolicyBase):
         if self._max_steps is not None:
             formatted += (
                 f"\n\nEnvironment step budget:\nYou have {self._max_steps} environment steps "
-                "for the trial (a typical move takes ~10-60 steps)."
+                "for the trial. Every move tool result reports its step count (e.g. "
+                "`executing move_to over N steps (X.Xs)`). Pace yourself against the "
+                "environment step budget, not only the call budget."
             )
         if self._prior_learnings_text is not None:
             formatted = (
@@ -1278,7 +1280,7 @@ def _observation_content(
         lines.append(f"Instruction: {observation.instruction}")
     step = observation.extra.get("env_step")
     if isinstance(step, int) and max_steps is not None:
-        remaining = max(0, max_steps - step)
+        remaining = max_steps - step
         lines.append(f"Step budget: step {step}/{max_steps} ({remaining} env steps remaining).")
     lines.extend(_state_lines(observation, state_labels))
     app_line = _approvals_line(observation)
