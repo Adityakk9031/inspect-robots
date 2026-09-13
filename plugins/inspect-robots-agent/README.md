@@ -179,8 +179,10 @@ tool result does not report seconds.
 
 When the embodiment publishes operating notes via `EmbodimentInfo.docs`
 (joint layout, sign conventions, gripper polarity), the policy appends them
-to the system prompt as an `Embodiment notes:` section. The per-step
-observation also labels the proprioceptive state vector with the action
+to the system prompt as an `Embodiment notes:` section. The system prompt
+also includes an `Embodiment bounds:` section with per-dimension limits and
+labels any pinned dimensions (`Pinned dimensions: ... (fixed; do not attempt to move them)`).
+The per-step observation also labels the proprioceptive state vector with the action
 dimension names (`left_j0=0.01 ...`) whenever the mapping is unambiguous.
 
 Every action still passes the CLI's default safety approvers (bounds clamp plus

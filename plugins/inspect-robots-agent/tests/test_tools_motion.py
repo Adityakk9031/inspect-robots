@@ -1377,3 +1377,20 @@ def test_chunk_final_metadata_tagged_on_last_action() -> None:
     for action in actions[:-1]:
         assert "chunk_final" not in action.meta
     assert actions[-1].meta.get("chunk_final") is True
+
+
+def test_toolset_bounds_text_and_pinned_labels_and_give_up_description() -> None:
+    action_space = Box(
+        shape=(2,),
+        low=np.array([0.0, -1.0]),
+        high=np.array([0.0, 1.0]),
+        semantics=ActionSemantics(control_mode="joint_pos", dim_labels=("fixed_j", "movable_j")),
+    )
+    obs_space = ObservationSpace(state=StateSpec(fields=(StateField(key="joint_pos", shape=(2,)),)))
+    toolset = build_toolset(action_space, obs_space, control_hz=10.0)
+    assert "Per-dimension bounds: fixed_j: [0, 0], movable_j: [-1, 1]" in toolset.bounds_text
+    assert toolset.pinned_labels == ("fixed_j",)
+
+    schemas = toolset.schemas()
+    give_up_schema = next(s for s in schemas if s["function"]["name"] == "give_up")
+    assert "operators can widen limits between trials" in give_up_schema["function"]["description"]

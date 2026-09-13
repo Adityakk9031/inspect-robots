@@ -112,6 +112,9 @@ _UNSET: Final = _Unset()
 # Duplicated in inspect_robots_capx/policy.py; keep both limits in sync.
 _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
+# Native action units: 0.1 mm for eef_pos, 0.1 mrad for joints.
+_TARGET_REACHED_TOLERANCE = 1e-4
+
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
 proprioceptive state and camera images. Work toward the user's goal in \
@@ -783,6 +786,13 @@ class LLMAgentPolicy(PolicyBase):
         docs = self._embodiment_docs
         if docs is not None and docs.strip():
             formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
+        if self._toolset is not None:
+            formatted += f"\n\nEmbodiment bounds:\n{self._toolset.bounds_text}"
+            pinned = self._toolset.pinned_labels
+            if pinned:
+                formatted += (
+                    f"\nPinned dimensions: {', '.join(pinned)} (fixed; do not attempt to move them)."
+                )
         if self._prior_learnings_text is not None:
             formatted = (
                 formatted
@@ -1171,10 +1181,13 @@ class LLMAgentPolicy(PolicyBase):
             residual = toolset.residual(pending.target, observation)
             if residual is not None:
                 label, magnitude = residual
-                narration += (
-                    " Largest remaining offset from the requested target is "
-                    f"{magnitude:.4g} on {label}."
-                )
+                if magnitude > _TARGET_REACHED_TOLERANCE:
+                    narration += (
+                        " Largest remaining offset from the requested target is "
+                        f"{magnitude:.4g} on {label}."
+                    )
+                else:
+                    narration += " Target reached."
         if missing:
             narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
         return narration
