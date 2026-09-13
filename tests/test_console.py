@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import select
 import sys
+import types
 from collections.abc import Callable
 
 import pytest
@@ -15,6 +17,8 @@ from inspect_robots.console import (
     EndRequest,
     OperatorConsole,
     OperatorInput,
+    _stdin_read,
+    _stdin_readable,
 )
 
 
@@ -237,9 +241,6 @@ def test_tty_defaults_can_be_bound_without_reading_stdin() -> None:
 
 
 def test_stdin_readable_swallows_oserror_from_select(monkeypatch: pytest.MonkeyPatch) -> None:
-    import select
-    from inspect_robots.console import _stdin_readable
-
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(
         select, "select", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("bad fd"))
@@ -248,9 +249,6 @@ def test_stdin_readable_swallows_oserror_from_select(monkeypatch: pytest.MonkeyP
 
 
 def test_stdin_readable_windows_kbhit(monkeypatch: pytest.MonkeyPatch) -> None:
-    import types
-    from inspect_robots.console import _stdin_readable
-
     fake_msvcrt = types.ModuleType("msvcrt")
     fake_msvcrt.kbhit = lambda: True  # type: ignore[attr-defined]
     monkeypatch.setattr(sys, "platform", "win32")
@@ -260,9 +258,6 @@ def test_stdin_readable_windows_kbhit(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_stdin_read_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    import types
-    from inspect_robots.console import _stdin_read
-
     chars = ["h", "i", "\r"]
     fake_msvcrt = types.ModuleType("msvcrt")
     fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
