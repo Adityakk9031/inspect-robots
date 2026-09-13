@@ -32,6 +32,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** `DeltaLimitApprover` now raises `SafetyAbort` on `±inf` as well as
+  `NaN`; previously an infinite first absolute-mode target was stored as the
+  reference and disabled the limiter on that dimension for the rest of the
+  trial ([#376](https://github.com/robocurve/inspect-robots/pull/376)).
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
