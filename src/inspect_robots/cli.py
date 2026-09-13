@@ -112,6 +112,11 @@ def _styled(text: str, code: str) -> str:
     return f"\x1b[{code}m{text}\x1b[0m"
 
 
+def _format_metric(value: float | int | None) -> str:
+    """Format numeric metric value or return 'n/a' when None."""
+    return "n/a" if value is None else f"{value:.4g}"
+
+
 _BOLD = "1"
 _BOLD_BRIGHT_MAGENTA = "1;95"
 _DIM = "2"
@@ -1374,7 +1379,7 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
         trials += f" ({errored_count} errored)"
     print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+        print(f"  {name}: {_styled(_format_metric(value), _BOLD)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
     # Every run ends with the copy-pasteable read-back command (issue #90):
     # a bare path teaches a first-time user nothing about what to do next.
@@ -1843,7 +1848,7 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
     for log in logs:
         ok = log.status == "success"
         metrics = ", ".join(
-            f"{name}={value:.4g}" for name, value in sorted(log.results.metrics.items())
+            f"{name}={_format_metric(value)}" for name, value in sorted(log.results.metrics.items())
         )
         detail = metrics or (log.error or "")
         row = f"  [{_styled(_display_status(log.status), _GREEN if ok else _RED)}] {log.eval.task}"
@@ -2026,11 +2031,11 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {'n/a' if value is None else f'{value:.4g}'}")
+        print(f"  {name}: {_format_metric(value)}")
     print("scenes:")
     for scene in log.samples:
         reduced = "  ".join(
-            f"{k}={'n/a' if v is None else f'{v:.4g}'}" for k, v in sorted(scene.reduced.items())
+            f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items())
         )
         step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
         details = [reduced] if reduced else []
