@@ -13,6 +13,7 @@ def _entry(
     page: str | None = "run.html",
     created: str = "2026-07-30T12:00:00Z",
     instruction: str = "pick up the cube",
+    model: str | None = "provider/models/claude-test",
     status: str = "completed",
     status_class: str = "status-completed",
     metrics: dict[str, float] | None = None,
@@ -24,7 +25,7 @@ def _entry(
         created=created,
         instruction=instruction,
         policy="agent",
-        model="provider/models/claude-test",
+        model=model,
         status=status,
         status_class=status_class,
         metrics={"success_at_end": 0.75} if metrics is None else metrics,
@@ -127,10 +128,10 @@ def test_row_without_page_has_no_data_href_attribute() -> None:
     assert '<tr data-href="' not in document
 
 
-def test_delegated_row_click_listener_is_present_once() -> None:
+def test_click_listeners_are_row_delegation_and_header_sort() -> None:
     document = render_index([_entry("run.json")])
 
-    assert document.count('addEventListener("click"') == 1
+    assert document.count('addEventListener("click"') == 2
     assert 'event.target.closest("tr[data-href]")' in document
     assert 'event.target.closest("a")' in document
     assert "getSelection().toString()" in document
@@ -151,6 +152,26 @@ def test_empty_index_has_no_data_href_attribute() -> None:
 
     assert "<!doctype html>" in document
     assert '<tr data-href="' not in document
+    assert '<td class="empty" colspan="9">no evaluation logs found</td>' in document
+
+
+def test_index_has_run_number_and_sortable_headers() -> None:
+    document = render_index(
+        [
+            _entry("old.json", created="2026-07-29T12:00:00Z"),
+            _entry("new.json", created="2026-07-30T12:00:00Z"),
+            _entry("corrupt.json", created="", model=None),
+        ]
+    )
+
+    assert '<th data-col="0">Run #</th>' in document
+    assert '<th data-col="1" class="sort-desc" aria-sort="descending">When</th>' in document
+    assert '<td class="run-num" data-val="1">#1</td>' in document
+    assert '<td class="run-num" data-val="2">#2</td>' in document
+    assert '<td class="run-num" data-val="">-</td>' in document
+    assert "Header click-to-sort" in document
+    assert "const isNum = v => /^-?\\d+(\\.\\d+)?$/.test(v);" in document
+    assert 'th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");' in document
 
 
 def test_static_index_has_no_meta_refresh() -> None:
