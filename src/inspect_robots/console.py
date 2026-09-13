@@ -65,20 +65,20 @@ class OperatorInput(Protocol):
 
 
 def _stdin_readable() -> bool:
-    if sys.platform == "win32":
+    if sys.platform == "win32":  # pragma: no cover
         if not sys.stdin.isatty():
             return False
         import msvcrt
 
         return msvcrt.kbhit()
-    try:
-        return bool(select.select([sys.stdin], [], [], 0)[0])  # pragma: no cover
-    except OSError:
+    try:  # pragma: no cover
+        return bool(select.select([sys.stdin], [], [], 0)[0])
+    except OSError:  # pragma: no cover
         return False
 
 
 def _stdin_read() -> str:
-    if sys.platform == "win32":
+    if sys.platform == "win32":  # pragma: no cover
         import msvcrt
 
         chars = []
