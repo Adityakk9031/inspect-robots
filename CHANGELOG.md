@@ -32,6 +32,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+<<<<<<< HEAD
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
@@ -70,8 +71,9 @@ All notable changes to this project are documented here. The format is based on
 - **Core:** the operator footer now echoes typing on a background cadence, so
   feedback is visible while an agent policy is blocked in inference instead of
   appearing only when the robot moves
-  ([plan 0066](plans/0066-footer-echo-pump.md),
-  [#367](https://github.com/robocurve/inspect-robots/issues/367)).
+- **Voice plugin (0.5.2):** discard captured microphone blocks during active
+  TTS playback and echo tail hangover when `--speak` and `--voice` run together
+  ([#332](https://github.com/robocurve/inspect-robots/issues/332)).
 
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
   instead of draining it at eval end

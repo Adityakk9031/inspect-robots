@@ -19,6 +19,7 @@ import numpy.typing as npt
 
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.types import OPERATOR_END
+from inspect_robots_voice._capture import _register_speaker, _unregister_speaker
 from inspect_robots_voice._tts import KokoroEngine, TtsEngine, resolve_model_files
 
 if TYPE_CHECKING:
@@ -309,12 +310,16 @@ class SpeakerSink(NullSink):
                     continue
                 gained = np.asarray(samples * np.float32(self.volume), dtype=np.float32)
                 chunk_size = max(1, int(sample_rate * _CHUNK_SECONDS))
-                for start in range(0, len(gained), chunk_size):
-                    if self._stop.is_set():
-                        return
-                    if self._speech_gen != gen:
-                        break
-                    playback.write(gained[start : start + chunk_size], sample_rate)
+                _register_speaker(self)
+                try:
+                    for start in range(0, len(gained), chunk_size):
+                        if self._stop.is_set():
+                            return
+                        if self._speech_gen != gen:
+                            break
+                        playback.write(gained[start : start + chunk_size], sample_rate)
+                finally:
+                    _unregister_speaker(self)
             except Exception as exc:
                 with self._condition:
                     self._disabled = True
