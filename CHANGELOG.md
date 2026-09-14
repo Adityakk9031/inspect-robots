@@ -32,6 +32,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **CLI:** `--epochs N` now overrides only the epoch count. A task declared with
+  a non-default reducer (`Epochs(count=5, reducer="pass_at_2")`, `max`, `mode`)
+  keeps that reducer under `run --epochs` and `eval-set --epochs`; previously the
+  flag silently replaced it with `mean`, so the reported metric was computed with
+  the wrong reducer.
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes

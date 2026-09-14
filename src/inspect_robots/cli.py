@@ -737,9 +737,12 @@ def _resolve_or_exit(
 def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = False) -> Task:
     """Apply ``--epochs`` with a guided error instead of a raw traceback.
 
-    ``replace()`` reruns ``Task.__post_init__``, which rejects a count below 1
-    via ``ConfigError`` — the same validation-error class ``_resolve_or_exit``
-    already converts to ``SystemExit``.
+    Only the count is overridden: the task's declared epoch reducer (e.g.
+    ``Epochs(count=5, reducer="pass_at_2")``) is carried over, so the flag
+    never silently swaps a benchmark's ``pass_at_k``/``max`` for ``mean``.
+    ``Epochs.__post_init__`` rejects a count below 1 via ``ConfigError`` — the
+    same validation-error class ``_resolve_or_exit`` already converts to
+    ``SystemExit``.
 
     ``attribute_task`` names the offending task, which ``eval-set`` needs to
     say *which* of several tasks rejected the flag; ``run`` has only one.
@@ -749,7 +752,7 @@ def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = Fal
     from inspect_robots.errors import ConfigError
 
     try:
-        return replace(task, epochs=epochs)
+        return replace(task, epochs=replace(task.epoch_spec, count=epochs))
     except ConfigError as exc:
         # `__post_init__` re-validates every field, but the task was already
         # valid and only `epochs` changed — so the epoch-count check is the
