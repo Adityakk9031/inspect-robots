@@ -79,8 +79,10 @@ cube has the centre at `+0.0127` along z:
 }
 ```
 
-Several tags on one object are averaged as a rigid body, so the cube stays
-tracked when the gripper hides its top face.
+Several tags on one object are averaged as a rigid body. From a top-down
+camera the side faces are edge-on, so once the gripper covers the top tag the
+cube is effectively unseen; the policy tolerates that in `descend` (the goal
+is the remembered pose) and pins the cube to the gripper while it is held.
 
 ### 3. Calibrate the camera once
 
@@ -154,7 +156,7 @@ inspect-robots "put the cube in the bowl" --policy jev \
 | `tags` | `tags.json` | tag layout file |
 | `calibration` | `calibration.json` | camera-to-arm transforms |
 | `history` | `5` | recent moves shown to Jev (it has no memory of its own) |
-| `stale_after` | `10` | hold, and log a stall, when the target tag is unseen this many steps |
+| `stale_after` | `10` | in `approach`/`carry`, hold and log a stall when the target tag has been unseen for this many Jev decisions (not control ticks) |
 | `cube`, `bowl` | `cube`, `bowl` | object names as they appear in `tags.json` |
 
 ## What the state looks like
@@ -181,4 +183,5 @@ before changing any wording.
 `jev_cube_in_bowl` reads the last recorded action's `meta["jev"]["world"]`
 and succeeds when the cube's tag ended within 4 cm horizontally of the bowl
 tag and no more than 3 cm above it, **and** the cube was actually re-detected
-after release (a cube stuck in the jaws is not credited).
+within the last 3 decisions after release (a cube stuck in the jaws, or a pose
+inferred from the gripper, is not credited).

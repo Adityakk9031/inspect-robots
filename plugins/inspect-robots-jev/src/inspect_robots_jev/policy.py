@@ -34,6 +34,8 @@ from inspect_robots_jev.world import ARMS, Arm, GripperView, Vec3, WorldState
 
 #: Phases during which the cube is in the gripper and its tags are expected to be hidden.
 _HELD_PHASES = frozenset({"lift", "carry", "lower"})
+#: Free-space steering phases: the only ones that stall when the target tag goes stale.
+_STALE_GATED = frozenset({"approach", "carry"})
 
 
 @dataclass(frozen=True)
@@ -130,9 +132,14 @@ class JevPolicy(PolicyBase):
             arm: GripperView(mapper.gripper_position(eef, arm), mapper.gripper_opening(eef, arm))
             for arm in ARMS
         }
-        step = int(observation.extra.get("env_step", self._decisions + self._stalls))
+        # The world clock counts policy decisions (one per act), not control
+        # ticks: one pick plays 1-20 ticks, so `env_step` would make every
+        # stale budget 5-20x too short. `env_step` is kept for the transcript.
+        step = self._decisions + self._stalls
+        tick = int(observation.extra.get("env_step", -1))
+        held_for_world = self._held
         world = self._perceiver_instance().update(
-            observation, step, grippers=grippers, held=self._held
+            observation, step, grippers=grippers, held=held_for_world
         )
         self._last_world = world
         # Interpolate from the last commanded pose, not the measured one, so IK
@@ -149,11 +156,17 @@ class JevPolicy(PolicyBase):
         self._held = (phase.arm, cfg.task.cube) if phase.name in _HELD_PHASES else None
         if phase.name == "done":
             return self._finish(mapper, start, world, phase)
-        if phase.positional and (
+        # Only the free-space steering phases wait for a fresh sighting. In
+        # descend/lower the target is under the gripper and its tag is expected
+        # to be hidden; the goal is the remembered pose the state text already
+        # tells Jev to trust. Held phases pin the cube to the gripper.
+        if phase.name in _STALE_GATED and (
             phase.target not in world.objects
             or world.steps_since_seen(phase.target) > cfg.stale_after
         ):
-            return self._stall(mapper, start, world, phase, f"{phase.target} tag not seen")
+            return self._stall(
+                mapper, start, world, phase, f"{phase.target} tag not seen", held_for_world
+            )
         state = build_state(
             world,
             phase,
@@ -174,10 +187,13 @@ class JevPolicy(PolicyBase):
         self._last_target = np.asarray(chunk.actions[-1].data, dtype=np.float64)
         self._decisions += 1
         self._history.append(menu[answer.choice].split(";")[0])
-        summary = self._summary(phase, world, choice=answer.choice, confidence=answer.confidence)
+        summary = self._summary(
+            phase, world, choice=answer.choice, confidence=answer.confidence, held=held_for_world
+        )
         self._transcript.append(
             {
                 "step": step,
+                "tick": tick,
                 "phase": phase.name,
                 "arm": phase.arm,
                 "state": state,
@@ -227,18 +243,27 @@ class JevPolicy(PolicyBase):
                 arm: [float(v) for v in pos] for arm, pos in view.in_frame.items()
             }
             entry["seen_ago"] = world.steps_since_seen(name)
+            entry["from_gripper"] = view.from_gripper
             out[name] = entry
         return out
 
     def _summary(
-        self, phase: Phase | None, world: WorldState, *, choice: str, confidence: float | None
+        self,
+        phase: Phase | None,
+        world: WorldState,
+        *,
+        choice: str,
+        confidence: float | None,
+        held: tuple[Arm, str] | None,
     ) -> dict[str, Any]:
+        # `held` is the value the world was BUILT with, not the one chosen for
+        # the next step, so the scorer reads a flag that matches `world`.
         return {
             "phase": phase.name if phase is not None else None,
             "arm": phase.arm if phase is not None else None,
             "choice": choice,
             "confidence": confidence,
-            "held": self._held is not None,
+            "held": held is not None,
             "world": self._world_dict(world),
         }
 
@@ -254,7 +279,13 @@ class JevPolicy(PolicyBase):
         return self._with_meta(chunk, meta)
 
     def _stall(
-        self, mapper: MotionMapper, eef: Any, world: WorldState, phase: Phase | None, why: str
+        self,
+        mapper: MotionMapper,
+        eef: Any,
+        world: WorldState,
+        phase: Phase | None,
+        why: str,
+        held: tuple[Arm, str] | None = None,
     ) -> ActionChunk:
         self._stalls += 1
         self._transcript.append(
@@ -265,23 +296,25 @@ class JevPolicy(PolicyBase):
                 "reason": why,
             }
         )
-        summary = self._summary(phase, world, choice=HOLD, confidence=None)
+        summary = self._summary(phase, world, choice=HOLD, confidence=None, held=held)
         return self._hold(mapper, eef, {"jev": {**summary, "stall": why}})
 
     def _finish(
         self, mapper: MotionMapper, eef: Any, world: WorldState, phase: Phase
     ) -> ActionChunk:
         self._transcript.append({"step": world.step, "phase": "done", "request_stop": True})
-        summary = self._summary(phase, world, choice=HOLD, confidence=None)
+        summary = self._summary(phase, world, choice=HOLD, confidence=None, held=None)
         return self._hold(
             mapper, eef, {"request_stop": True, "stop_reason": "task_done", "jev": summary}
         )
 
 
 def _floats(value: Any) -> tuple[float, ...]:
-    if isinstance(value, str):
-        return tuple(float(part) for part in value.split(",") if part.strip())
-    return tuple(float(v) for v in value)
+    parts = value.split(",") if isinstance(value, str) else list(value)
+    steps = tuple(float(part) for part in parts if str(part).strip())
+    if not steps or any(step <= 0 for step in steps):
+        raise ValueError(f"steps_cm must be positive numbers, got {value!r}")
+    return steps
 
 
 def jev_policy(**kwargs: Any) -> JevPolicy:

@@ -82,6 +82,7 @@ def test_offset_sign_pins_tag_frame_convention() -> None:
     assert world.objects["cube"].in_frame["left"] == pytest.approx((0.0, 0.0, 0.7127))
     assert world.objects["cube"].in_frame["right"] == pytest.approx((0.0, -0.5, 0.7127))
     assert world.objects["cube"].last_seen_step == 0
+    assert world.objects["cube"].from_gripper is False
     # one detector call per distinct tag size, uint8 2-D input, K unpacked
     assert len(det.calls) == 3
     assert det.calls[0][0] == (8, 8) and det.calls[0][1] == "uint8"
@@ -138,6 +139,7 @@ def test_held_object_follows_gripper() -> None:
     p.update(obs(), 0, grippers=GRIPS)
     det.dets = []
     world = p.update(obs(), 1, grippers=GRIPS, held=("left", "cube"))
+    assert world.objects["cube"].from_gripper is True
     assert world.objects["cube"].in_frame["left"] == pytest.approx((0.2, 0.0, 0.19))
     assert world.objects["cube"].in_frame["right"] == pytest.approx((0.0, -0.5, 0.7127))
     assert world.steps_since_seen("cube") == 0
@@ -197,3 +199,19 @@ def test_perceiver_builds_real_detector_lazily(monkeypatch: pytest.MonkeyPatch) 
 
 def test_tagspec_is_plain_data() -> None:
     assert TagSpec(1, "x", 0.02, (0.0, 0.0, 0.0)).object == "x"
+
+
+def test_depth_thunk_resolved_once_and_implausible_depth_ignored() -> None:
+    calls: list[int] = []
+
+    def thunk() -> Any:
+        calls.append(1)
+        return np.full((20, 20), 900.0, dtype=np.float32)  # millimetres by mistake
+
+    det = FakeDetector([Det(0, (0.0, 0.0, 0.7)), Det(1, (0.0, 0.0, 0.7)), Det(14, (0.1, 0.1, 0.6))])
+    p = Perceiver(
+        layout=TagLayout.load(FIXTURE), camera="top_cam", calibration=identity_cal(), detector=det
+    )
+    world = p.update(obs(depth=thunk), 0, grippers=GRIPS)
+    assert calls == [1]
+    assert world.objects["bowl"].in_frame["left"] == pytest.approx((0.1, 0.1, 0.6))

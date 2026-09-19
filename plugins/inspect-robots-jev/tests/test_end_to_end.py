@@ -116,5 +116,4 @@ def test_cube_into_bowl_end_to_end(tmp_path: Path) -> None:
     for cmd in rig.commanded:
         assert np.all(cmd >= low - 1e-12) and np.all(cmd <= high + 1e-12)
     assert jev.calls > 10
-    # exercise the scorer on the actual recorded step meta: the cube was re-seen after release
     assert log.results.total_trials == 1

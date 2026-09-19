@@ -117,8 +117,13 @@ def to_gray(image: npt.NDArray[Any]) -> npt.NDArray[np.uint8]:
     return out
 
 
+#: Depth arrays are metres (YAM serves float32 metres); anything beyond this is a
+#: unit mistake (e.g. raw millimetres) and is ignored rather than scaling objects 1000x.
+_MAX_DEPTH_M = 10.0
+
+
 def _depth_at(depth: Any, centre: Any, window: int) -> float | None:
-    arr = np.asarray(depth() if callable(depth) else depth, dtype=np.float64)
+    arr = np.asarray(depth, dtype=np.float64)
     cx, cy = round(float(centre[0])), round(float(centre[1]))
     half = window // 2
     patch = arr[max(0, cy - half) : cy + half + 1, max(0, cx - half) : cx + half + 1]
@@ -172,8 +177,14 @@ class Perceiver:
         grippers: Mapping[Arm, GripperView],
         held: tuple[Arm, str] | None = None,
     ) -> WorldState:
-        """Detect tags, refresh remembered objects, and return this step's world."""
+        """Detect tags, refresh remembered objects, and return this step's world.
+
+        ``step`` is the policy's decision counter (one per ``act``), which is
+        what ``ObjectView.last_seen_step`` and every stale budget count in.
+        """
         depth = observation.extra.get(f"{self._camera}_depth")
+        if callable(depth):
+            depth = depth()  # resolve the YAM lazy thunk once per update, not per detection
         sums: dict[str, dict[Arm, np.ndarray]] = {}
         counts: dict[str, int] = {}
         for det in self._detect_all(observation):
@@ -181,7 +192,7 @@ class Perceiver:
             t = np.asarray(det.pose_t, dtype=np.float64).reshape(3)
             if depth is not None:
                 z = _depth_at(depth, det.center, self._window)
-                if z is not None and t[2] > 0:
+                if z is not None and t[2] > 0 and z < _MAX_DEPTH_M:
                     t = t * (z / t[2])
             T = pose_to_matrix(det.pose_R, t)
             centre_cam = transform(T, spec.offset_m)
@@ -204,5 +215,5 @@ class Perceiver:
             prev = self._memory.get(name)
             in_frame = dict(prev.in_frame) if prev is not None else {}
             in_frame[arm] = own
-            self._memory[name] = ObjectView(name, in_frame, last_seen_step=step)
+            self._memory[name] = ObjectView(name, in_frame, last_seen_step=step, from_gripper=True)
         return WorldState(step=step, objects=dict(self._memory), grippers=dict(grippers))

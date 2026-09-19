@@ -28,6 +28,20 @@ _BACKENDS: dict[str, tuple[str, str, str]] = {
 }
 
 
+#: Never sleep longer than this between attempts, whatever ``retry-after`` says.
+_MAX_RETRY_DELAY_S = 30.0
+
+
+def _retry_delay(retry_after: str | None, attempt: int) -> float:
+    """Seconds to wait: a numeric ``retry-after`` (capped), else a linear backoff."""
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), _MAX_RETRY_DELAY_S)
+        except ValueError:  # HTTP-date form: fall back to backoff
+            pass
+    return min(1.5 * attempt, _MAX_RETRY_DELAY_S)
+
+
 class DecisionsError(RuntimeError):
     """The Decisions API refused, failed, or returned an unusable answer."""
 
@@ -58,6 +72,10 @@ def urllib_post(
             return int(resp.status), _lower(resp.headers), bytes(resp.read())
     except urllib.error.HTTPError as err:
         return int(err.code), _lower(err.headers), bytes(err.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        # Connection reset, DNS failure, socket timeout: report as a synthetic
+        # 5xx so the client's retry loop handles it like a provider outage.
+        return 599, {}, f"connection error: {err}".encode()
 
 
 class DecisionsClient:
@@ -107,13 +125,19 @@ class DecisionsClient:
             attempt += 1
             status, headers, payload = self._post(self._url, self._headers, body, self._timeout)
             if (status == 429 or status >= 500) and attempt < self._max_attempts:
-                retry_after = headers.get("retry-after")
-                self._sleep(float(retry_after) if retry_after else 1.5 * attempt)
+                self._sleep(_retry_delay(headers.get("retry-after"), attempt))
                 continue
             break
         if status != 200:
             raise DecisionsError(f"decisions API returned HTTP {status}: {payload[:300]!r}")
-        raw: dict[str, Any] = json.loads(payload)
+        try:
+            raw = json.loads(payload)
+        except ValueError as err:
+            raise DecisionsError(
+                f"decisions API returned non-JSON body: {payload[:200]!r}"
+            ) from err
+        if not isinstance(raw, dict):
+            raise DecisionsError(f"decisions API returned a non-object body: {payload[:200]!r}")
         answer = raw.get("answers", {}).get(question_id)
         if not isinstance(answer, dict) or answer.get("type") != "choice":
             raise DecisionsError(f"no choice answer for question {question_id!r}: {raw!r}"[:500])

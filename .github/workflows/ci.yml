@@ -429,8 +429,8 @@ jobs:
           plugins/inspect-robots-jev/src/inspect_robots_jev
           plugins/inspect-robots-jev/tests
       - name: Pytest (plugin, with coverage)
-        # Report-only, like the other plugin jobs. The root 100% gate remains
-        # scoped to the numpy-only inspect_robots core package.
+        # Gating: this plugin owns its own 100 % coverage floor, separate from
+        # the root gate scoped to the numpy-only inspect_robots core package.
         run: >
           uv run --no-sync python -m pytest plugins/inspect-robots-jev/tests -q
           --cov=inspect_robots_jev --cov-report=term-missing --cov-fail-under=100

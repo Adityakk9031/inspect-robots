@@ -44,7 +44,7 @@ def test_approach_state_exact() -> None:
 
 def test_note_when_target_unseen() -> None:
     state = build_state(world(step=5, cube_seen=2), APPROACH, [])
-    assert state["note"] == "the cube was last seen 3 moves ago; assume it has not moved"
+    assert state["note"] == "the cube was last seen 3 decisions ago; assume it has not moved"
 
 
 def test_gripper_phase_has_no_offset() -> None:

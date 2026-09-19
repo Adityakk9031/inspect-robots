@@ -111,3 +111,10 @@ def test_custom_names_and_name() -> None:
         }
     }
     assert scorer(record(meta), None).value is True
+
+
+def test_pose_taken_from_gripper_is_not_credited() -> None:
+    meta = world((0.35, -0.10, 0.03), (0.35, -0.10, 0.02))
+    meta["jev"]["world"]["cube"]["from_gripper"] = True
+    s = cube_in_bowl()(record(meta), None)
+    assert s.value is False and "still held" in str(s.explanation)

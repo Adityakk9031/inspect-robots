@@ -60,11 +60,18 @@ def distance(a: Vec3, b: Vec3) -> float:
 
 @dataclass(frozen=True)
 class ObjectView:
-    """One tagged object's centre in every arm frame and the step it was last seen."""
+    """One tagged object's centre in every arm frame and the decision step it was last seen.
+
+    Steps are policy decisions (one per ``act`` call), not control ticks.
+    """
 
     name: str
     in_frame: Mapping[Arm, Vec3]
     last_seen_step: int
+    #: True when the pose is the gripper's pose plus a grasp offset (object held
+    #: and its tags hidden), not a tag detection. ``last_seen_step`` is still
+    #: refreshed so stale checks stay quiet while carrying.
+    from_gripper: bool = False
 
 
 @dataclass(frozen=True)

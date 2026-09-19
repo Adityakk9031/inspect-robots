@@ -7,15 +7,16 @@ import numpy as np
 import pytest
 
 from inspect_robots.embodiment import EmbodimentInfo
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import StepRecord, TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
-from inspect_robots.types import Observation
+from inspect_robots.types import Observation, StepResult
 from inspect_robots_jev._decisions import ChoiceAnswer
 from inspect_robots_jev.calibration import Calibration
 from inspect_robots_jev.perceiver import TagLayout
 from inspect_robots_jev.phase import TaskConfig
 from inspect_robots_jev.policy import JevPolicy, JevPolicyConfig, jev_policy
+from inspect_robots_jev.scorer import cube_in_bowl
 from inspect_robots_jev.world import Arm, GripperView, ObjectView, Vec3, WorldState
 
 LABELS = tuple(
@@ -81,10 +82,12 @@ class FakePerceiver:
             if self.visible or name != "cube":
                 self.seen_step[name] = step
             if name in self.seen_step:
+                pinned = held is not None and held[1] == name
                 views[name] = ObjectView(
                     name,
                     {"left": pos, "right": (pos[0], pos[1] + 0.5, pos[2])},
                     self.seen_step[name],
+                    from_gripper=pinned,
                 )
         return WorldState(step=step, objects=views, grippers=grippers)
 
@@ -203,9 +206,12 @@ def test_stall_when_target_stale() -> None:
     policy.act(obs())
     perc.visible = False
     for step in range(1, 12):
-        chunk = policy.act(obs(step=step))
-    # steps 1..10 are within stale_after=10 and still ask Jev; step 11 stalls
+        # env_step counts control ticks and jumps by many per decision; the
+        # stale budget must count decisions, so these jumps must not matter
+        chunk = policy.act(obs(step=step * 7))
+    # decisions 1..10 are within stale_after=10 and still ask Jev; decision 11 stalls
     assert len(client.calls) == 11
+    assert policy.transcript()[1]["tick"] == 7
     assert chunk.actions[0].meta["jev"]["stall"] == "cube tag not seen"
     assert policy.transcript()[-1]["reason"] == "cube tag not seen"
 
@@ -316,3 +322,46 @@ def test_reset_without_perceiver_is_safe() -> None:
     policy = JevPolicy()
     policy.reset(Scene(id="s", instruction="x"))
     assert policy.transcript() == [] and policy.settings == JevPolicyConfig()
+
+
+def test_descend_does_not_stall_when_cube_tag_is_hidden() -> None:
+    perc = FakePerceiver()
+    policy, client, _ = make(["left_z_minus_2cm"] * 3, perc)
+    policy.act(obs())
+    assert policy._machine is not None
+    policy._machine._name = "descend"
+    perc.visible = False
+    for step in range(1, 3):
+        policy.act(obs(left=(0.30, 0.10, 0.08), step=step))
+    # both descend acts asked Jev although the cube was unseen: the goal is the remembered pose
+    assert len(client.calls) == 3
+    assert not any(e.get("stall") for e in policy.transcript())
+
+
+def test_release_with_hold_is_not_scored_as_success() -> None:
+    perc = FakePerceiver()
+    policy, _, _ = make(["left_z_plus_2cm", "left_z_minus_0.5cm", "hold"], perc)
+    policy.act(obs())
+    assert policy._machine is not None
+    policy._machine._name = "lower"
+    policy.act(obs(left=(0.35, -0.10, 0.09), opening=0.3, step=1))  # held during lower
+    assert policy._held == ("left", "cube")
+    policy._machine._name = "release"
+    chunk = policy.act(obs(left=(0.35, -0.10, 0.03), opening=0.3, step=2))  # Jev says hold
+    meta = chunk.actions[-1].meta["jev"]
+    # the world for this step was built with the cube pinned to the gripper
+    assert meta["held"] is True and meta["world"]["cube"]["from_gripper"] is True
+    record = TrialRecord(scene_id="s", epoch=0, seed=None)
+    record.steps.append(
+        StepRecord(
+            t=0, observation=obs(), action=chunk.actions[-1], result=StepResult(observation=obs())
+        )
+    )
+    assert cube_in_bowl()(record, None).value is False
+
+
+def test_steps_cm_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        jev_policy(steps_cm="0,2")
+    with pytest.raises(ValueError, match="positive"):
+        jev_policy(steps_cm="")

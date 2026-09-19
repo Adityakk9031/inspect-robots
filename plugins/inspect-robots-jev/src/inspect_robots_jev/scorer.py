@@ -3,7 +3,8 @@
 ``eval()`` scores a trial before ``policy.on_trial_end`` runs, so the scorer
 reads ``record.steps[-1].action.meta["jev"]`` (approvers preserve meta) rather
 than ``record.metadata``. A cube that was never re-detected after release is
-not credited: its last pose would be the in-gripper estimate.
+not credited: its last pose would be the in-gripper estimate. ``seen_ago``
+and ``max_unseen`` count policy decisions, not control ticks.
 """
 
 from __future__ import annotations
@@ -38,13 +39,13 @@ class _CubeInBowl:
         cube, bowl = world.get(self._cube), world.get(self._bowl)
         if cube is None or bowl is None:
             return Score(value=False, explanation=f"{self._cube} or {self._bowl} never observed")
-        if meta.get("held"):
+        if meta.get("held") or cube.get("from_gripper"):
             return Score(value=False, explanation=f"{self._cube} still held at the end")
         seen_ago = int(cube.get("seen_ago", 0))
         if seen_ago > self._max_unseen:
             return Score(
                 value=False,
-                explanation=f"{self._cube} not observed after release ({seen_ago} steps ago)",
+                explanation=(f"{self._cube} not observed after release ({seen_ago} decisions ago)"),
             )
         arm = "left" if "left" in cube and "left" in bowl else "right"
         if arm not in cube or arm not in bowl:

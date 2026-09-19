@@ -194,3 +194,41 @@ def test_default_post_used_when_not_injected(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(_decisions, "urllib_post", fake_post)
     DecisionsClient(api_key="k").choose(state="s", instructions="i", criteria={"a": "A"})
     assert called == ["https://openrouter.ai/api/alpha/decisions"]
+
+
+def test_retry_after_http_date_and_cap() -> None:
+    from inspect_robots_jev._decisions import _retry_delay
+
+    assert _retry_delay("Wed, 21 Oct 2026 07:28:00 GMT", 2) == 3.0
+    assert _retry_delay("3600", 1) == 30.0
+    assert _retry_delay("-5", 1) == 0.0
+    assert _retry_delay(None, 30) == 30.0
+
+
+def test_connection_errors_become_retryable_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(req: Any, timeout: float) -> Any:
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    status, hdrs, body = _decisions.urllib_post("https://x.test/", {}, b"{}", 1.0)
+    assert status == 599 and hdrs == {} and b"connection reset" in body
+
+
+def test_non_json_and_non_object_bodies_raise_decisions_error() -> None:
+    class RawPost:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __call__(
+            self, url: str, headers: dict[str, str], body: bytes, timeout: float
+        ) -> tuple[int, dict[str, str], bytes]:
+            return 200, {}, self.payload
+
+    with pytest.raises(DecisionsError, match="non-JSON"):
+        DecisionsClient(api_key="k", http_post=RawPost(b"<html>")).choose(
+            state="s", instructions="i", criteria={"a": "A"}
+        )
+    with pytest.raises(DecisionsError, match="non-object"):
+        DecisionsClient(api_key="k", http_post=RawPost(b"[1, 2]")).choose(
+            state="s", instructions="i", criteria={"a": "A"}
+        )

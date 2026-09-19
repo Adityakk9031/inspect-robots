@@ -86,7 +86,7 @@ def build_state(
         unseen = world.steps_since_seen(phase.target)
         if unseen > 0:
             state["note"] = (
-                f"the {phase.target} was last seen {unseen} moves ago; assume it has not moved"
+                f"the {phase.target} was last seen {unseen} decisions ago; assume it has not moved"
             )
     return state
 
