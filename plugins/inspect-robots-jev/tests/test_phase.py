@@ -41,11 +41,43 @@ def test_reset_picks_closer_arm_and_hover_goal() -> None:
     assert p.positional
 
 
+def test_reset_picks_arm_by_base_distance_not_gripper() -> None:
+    # The right gripper is parked on top of the cube, but the cube is far from
+    # the right arm's base (y = 0.60 in its frame) and near the left base.
+    m = PhaseMachine(TaskConfig())
+    p = m.reset(world(left=(0.0, -0.4, 0.4), right=(0.30, 0.60, 0.013)))
+    assert p.arm == "left"
+
+
 def test_reset_can_pick_right_arm() -> None:
     m = PhaseMachine(TaskConfig())
-    p = m.reset(world(left=(0.0, -0.4, 0.4), right=(0.30, 0.60, 0.05)))
+    w = WorldState(
+        step=0,
+        objects={
+            "cube": ObjectView(
+                "cube", {"left": (0.30, 0.60, 0.013), "right": (0.30, 0.10, 0.013)}, 0
+            ),
+            "bowl": ObjectView("bowl", {"left": BOWL, "right": BOWL}, 0),
+        },
+        grippers={
+            "left": GripperView((0.2, 0.0, 0.2), 1.0),
+            "right": GripperView((0.2, 0.0, 0.2), 1.0),
+        },
+    )
+    p = m.reset(w)
     assert p.arm == "right"
-    assert p.goal == pytest.approx((0.30, 0.60, 0.063))
+    assert p.goal == pytest.approx((0.30, 0.10, 0.063))
+
+
+def test_goals_are_clamped_into_bounds_so_floor_does_not_deadlock() -> None:
+    bounds = ((0.15, -0.25, 0.03), (0.48, 0.25, 0.40))
+    m = PhaseMachine(TaskConfig(), bounds=bounds)
+    m.reset(world())
+    m.advance(world(left=(0.30, 0.10, 0.063)))
+    p = m.phase
+    assert p.name == "descend" and p.goal == pytest.approx((0.30, 0.10, 0.03))
+    # gripper stops at the floor; the transition must still fire
+    assert m.advance(world(left=(0.30, 0.10, 0.03))).name == "grasp"
 
 
 def test_full_happy_path() -> None:

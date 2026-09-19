@@ -7,11 +7,12 @@ Every rule is a tolerance test on numbers the perceiver already produced.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
 from inspect_robots_jev.menu import MenuKind
-from inspect_robots_jev.world import ARMS, Arm, Vec3, WorldState, distance
+from inspect_robots_jev.world import ARMS, Arm, Vec3, WorldState
 
 PhaseName = Literal[
     "approach", "descend", "grasp", "lift", "carry", "lower", "release", "retreat", "done"
@@ -78,11 +79,28 @@ def _add(p: Vec3, dz: float) -> Vec3:
     return (p[0], p[1], p[2] + dz)
 
 
-class PhaseMachine:
-    """Track the cube-into-bowl stage and advance it on tolerance rules."""
+def _clamp(p: Vec3, bounds: tuple[Vec3, Vec3] | None) -> Vec3:
+    if bounds is None:
+        return p
+    low, high = bounds
+    return (
+        min(max(p[0], low[0]), high[0]),
+        min(max(p[1], low[1]), high[1]),
+        min(max(p[2], low[2]), high[2]),
+    )
 
-    def __init__(self, config: TaskConfig) -> None:
+
+class PhaseMachine:
+    """Track the cube-into-bowl stage and advance it on tolerance rules.
+
+    ``bounds`` is ``(low_xyz, high_xyz)`` of the arm's workspace; every
+    positional goal is clamped into it before the tolerance test, so a goal
+    below the configured z floor (YAM default 0.03 m) cannot deadlock a phase.
+    """
+
+    def __init__(self, config: TaskConfig, *, bounds: tuple[Vec3, Vec3] | None = None) -> None:
         self._cfg = config
+        self._bounds = bounds
         self._name: PhaseName = "approach"
         self._arm: Arm = "left"
         self._grasp_point: Vec3 | None = None
@@ -96,11 +114,9 @@ class PhaseMachine:
         return self._phase
 
     def reset(self, world: WorldState) -> Phase:
-        """Start over, choosing the arm whose gripper is nearer the cube."""
+        """Start over, choosing the arm whose base (frame origin) is nearer the cube."""
         cube = world.objects[self._cfg.cube]
-        self._arm = min(
-            ARMS, key=lambda arm: distance(cube.in_frame[arm], world.grippers[arm].position)
-        )
+        self._arm = min(ARMS, key=lambda arm: math.hypot(*cube.in_frame[arm]))
         self._name = "approach"
         self._grasp_point = None
         self._phase = self._build(world)
@@ -155,17 +171,19 @@ class PhaseMachine:
             return None
         target = world.objects[self._target_name()].in_frame[arm]
         if name == "approach":
-            return _add(target, cfg.hover_m)
-        if name == "descend":
-            return target
-        if name == "lift":
+            goal = _add(target, cfg.hover_m)
+        elif name == "descend":
+            goal = target
+        elif name == "lift":
             base = self._grasp_point if self._grasp_point is not None else target
-            return _add(base, cfg.lift_m)
-        if name == "carry":
-            return _add(target, cfg.hover_m + cfg.cube_half_m)
-        if name == "lower":
-            return _add(target, cfg.cube_half_m - cfg.bowl_depth_m)
-        return _add(target, cfg.lift_m)  # retreat
+            goal = _add(base, cfg.lift_m)
+        elif name == "carry":
+            goal = _add(target, cfg.hover_m + cfg.cube_half_m)
+        elif name == "lower":
+            goal = _add(target, cfg.cube_half_m - cfg.bowl_depth_m)
+        else:  # retreat
+            goal = _add(target, cfg.lift_m)
+        return _clamp(goal, self._bounds)
 
     def _build(self, world: WorldState) -> Phase:
         return Phase(
