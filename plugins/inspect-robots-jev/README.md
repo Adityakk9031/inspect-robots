@@ -14,7 +14,9 @@ plugin describes where the target is relative to the gripper in plain words
 ("3.5 cm FORWARD, 4 cm BELOW"), offers a menu of small moves with a hint on
 each ("use when the cube is 2 to 5 cm away"), and executes whichever one Jev
 picks. Code owns the task phases (approach, descend, grasp, lift, carry,
-lower, release, retreat); Jev steers inside each phase. Registered as the
+lower, release, retreat, verify); Jev steers inside each phase. Descents also
+end on contact (the measured height stops dropping), and the trial only ends
+once the released cube's tag has been seen again from above. Registered as the
 policy `jev` and the scorer `jev_cube_in_bowl`.
 
 Design, measurements, and the decisions behind them:

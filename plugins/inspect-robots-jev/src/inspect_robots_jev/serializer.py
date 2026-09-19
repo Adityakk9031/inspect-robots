@@ -29,6 +29,7 @@ _TASK: dict[str, str] = {
     "lower": "Lower the {arm} gripper into the {target}.",
     "release": "Open the {arm} gripper to drop the cube into the {target}.",
     "retreat": "Raise the {arm} gripper straight up, away from the {target}.",
+    "verify": ("Raise the {arm} gripper straight up until the camera can see the {target} again."),
     "done": "The task is complete.",
 }
 _STEER = (

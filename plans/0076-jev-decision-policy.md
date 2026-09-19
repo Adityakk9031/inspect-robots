@@ -203,7 +203,17 @@ plugins/inspect-robots-jev/
 | carry | steer to hover above the bowl centre | 6 directions × 3 step sizes + hold | within 1.5 cm above the bowl centre |
 | lower | descend into the bowl | UP/DOWN steps + hold | grasp point below bowl rim height |
 | release | open | open / hold | gripper reads open |
-| retreat | rise clear | UP steps + hold | 8 cm above the rim; then `done` |
+| retreat | rise clear | UP steps + hold | 8 cm above the bowl tag; then `verify` |
+| verify | keep rising until the camera sees the cube again | UP/DOWN steps + hold | the cube's tag is re-detected this decision (not inferred from the gripper), or `verify_decisions` (8) elapse; then `done` |
+
+Contact rule: `descend` and `lower` also complete when the gripper's measured
+height has not dropped by more than `z_tol_m` over `contact_decisions` (3)
+consecutive decisions, because the fingers or the carried cube are resting on
+something (a bowl shallower than `bowl_depth_m`, the table under a low cube).
+Without it the computed goal can be unreachable and the arm would press down
+until the horizon. The policy also restarts its command interpolation from
+the measured pose whenever commanded and measured differ by more than 2 cm on
+any axis, so a blocked arm is never driven from a phantom pose.
 
 The arm is the one whose base is closer to the cube at reset. The
 scorer marks success when the cube tag's final position is inside the
@@ -1231,6 +1241,8 @@ class TaskConfig:
     closed_on_object: float = 0.35  # gripper opening ≤ this while closed on the cube
     closed_on_air: float = 0.02     # ≤ this means the jaws met: nothing was grasped
     open_threshold: float = 0.8
+    verify_decisions: int = 8       # wait this long in `verify` for the cube's tag to reappear
+    contact_decisions: int = 3      # flat measured height over this many decisions = contact
     cube_half_m: float = 0.0127
 
 @dataclass(frozen=True)
@@ -1256,7 +1268,10 @@ class PhaseMachine:
 The machine stores `_grasp_point` (the gripper position at the `grasp → lift`
 transition) because the `lift` goal is relative to where the grasp happened;
 every other goal is recomputed from the current world each call, then
-clamped into `bounds`.
+clamped into `bounds`. It also keeps a short trace of measured gripper
+heights for the contact rule and a `verify` decision counter; both reset on
+every phase change. The cube's pose is substituted from the gripper during
+`lift`/`carry`/`lower` only (the policy's `_HELD_PHASES`).
 
 Transition rules (evaluated in order, one transition per call):
 - `approach`: goal = clamp(cube + (0,0,hover)). → `descend` when xy within `xy_tol` and z within `z_tol` of goal.
@@ -1267,8 +1282,10 @@ Transition rules (evaluated in order, one transition per call):
 - `carry`: goal = bowl + (0,0,hover + cube_half). menu `xyz`. → `lower` when xy within `xy_tol`.
 - `lower`: goal = clamp(bowl − (0,0,bowl_depth) + cube_half). menu `z`. → `release` when z within z_tol.
 - `release`: menu `grip_open`. → `retreat` when opening ≥ `open_threshold`.
-- `retreat`: goal = bowl + (0,0,lift). menu `z`. → `done` when z ≥ goal z − z_tol.
+- `retreat`: goal = bowl + (0,0,lift). menu `z`. → `verify` when z ≥ goal z − z_tol.
+- `verify`: goal = bowl + (0,0,lift + hover), menu `z`, target name `cube` (the state says "raise until the camera can see the cube again"). → `done` when the cube's `ObjectView` is `not from_gripper` and `steps_since_seen(cube) == 0`, or after `verify_decisions` decisions (then the scorer fails the trial honestly). Without this phase the trial could end while the gripper still hid the cube, and a physically successful run would score 0.
 - `done`: stays.
+- Contact: in `descend`/`lower`, `blocked` is True when the last `contact_decisions + 1` measured z values span ≤ `z_tol_m`; the phase then completes as if the goal were reached.
 
 The cube's position during `grasp`/`lift`/`carry`/`lower` is taken from the world (the perceiver substitutes gripper + offset when hidden, Task 8), so the machine never guesses.
 
@@ -1519,7 +1536,7 @@ def jev_policy(**kwargs: Any) -> JevPolicy   # registry entry. Every -P value ar
                                              # Unknown keys -> TypeError.
 ```
 
-`act` algorithm: `eef = observation.state["eef_state"]`; grippers from the mapper; `start = last commanded target if any else eef`; `world = perceiver.update(..., held=self._held)` where `self._held` was set at the end of the *previous* step as `(phase.arm, cfg.task.cube) if phase.name in ("lift", "carry", "lower") else None` (the world for this step is built before `advance`). Note: with a top-down camera the cube's top tag is hidden by the gripper during `descend`/`grasp`, so the stale counter runs there. Stale budgets (`stale_after`, the scorer's `max_unseen`, `ObjectView.last_seen_step`) count **policy decisions**, one per `act`, never `env_step` control ticks (one pick plays 1–20 ticks). Only `approach`/`carry` stall on a stale target; `descend`/`lower` steer to the remembered pose and held phases pin the cube to the gripper. The per-action `meta["jev"]["held"]` describes the world the step was built with (the value passed to the perceiver), not the next step's flag, and `world[obj]["from_gripper"]` marks a pose inferred from the gripper so the scorer never credits it; on the first act after reset, `phase = machine.reset(world)` else `machine.advance(world)`. If `phase.name == "done"` → hold chunk whose single `Action.meta` carries `{"request_stop": True, "stop_reason": "task_done", "jev": {...}}` (the rollout reads `request_stop` from `Action.meta`, not chunk meta). If target missing from world or `steps_since_seen > stale_after` and phase is positional → hold chunk, `stalls += 1`, transcript entry with `"stall": True`. Else `state = build_state(...)`, `menu = build_menu(...)`, `answer = client.choose(...)`, `move = parse_option(answer.choice)`, `chunk = mapper.chunk(move, eef)`; append `menu[answer.choice].split(";")[0]` to history; transcript entry `{"step", "phase", "state", "instructions", "menu", "answer": {"choice", "probabilities", "confidence", "model", "usage"}, "actions": len(chunk.actions)}`; every `Action` in every returned chunk (including hold and stall chunks) carries `meta["jev"] = {"phase", "arm", "choice", "confidence", "held": bool, "world": {obj: {arm: [x, y, z], "seen_ago": int}}}` so the scorer can read the final world from `record.steps[-1].action.meta` (scoring runs before `on_trial_end`; approvers preserve `meta`). `on_trial_end` still writes the summary to `record.metadata["jev"]` for the log. `DecisionsError` propagates (core wraps it as `PolicyError`).
+`act` algorithm: `eef = observation.state["eef_state"]`; grippers from the mapper; `start = last commanded target if any else eef`; `world = perceiver.update(..., held=self._held)` where `self._held` was set at the end of the *previous* step as `(phase.arm, cfg.task.cube) if phase.name in ("lift", "carry", "lower") else None` (the world for this step is built before `advance`). Note: with a top-down camera the cube's top tag is hidden by the gripper during `descend`/`grasp`, so the stale counter runs there. Stale budgets (`stale_after`, the scorer's `max_unseen`, `ObjectView.last_seen_step`) count **policy decisions**, one per `act`, never `env_step` control ticks (one pick plays 1–20 ticks). Only `approach`/`carry` stall on a stale target, and a stall there **rises by `hover_m`** rather than holding, because the likeliest reason the tag is unseen is the gripper hovering over it; `descend`/`lower` steer to the remembered pose and held phases pin the cube to the gripper. The per-action `meta["jev"]["held"]` describes the world the step was built with (the value passed to the perceiver), not the next step's flag, and `world[obj]["from_gripper"]` marks a pose inferred from the gripper so the scorer never credits it; on the first act after reset, `phase = machine.reset(world)` else `machine.advance(world)`. If `phase.name == "done"` → hold chunk whose single `Action.meta` carries `{"request_stop": True, "stop_reason": "task_done", "jev": {...}}` (the rollout reads `request_stop` from `Action.meta`, not chunk meta). If target missing from world or `steps_since_seen > stale_after` and phase is positional → hold chunk, `stalls += 1`, transcript entry with `"stall": True`. Else `state = build_state(...)`, `menu = build_menu(...)`, `answer = client.choose(...)`, `move = parse_option(answer.choice)`, `chunk = mapper.chunk(move, eef)`; append `menu[answer.choice].split(";")[0]` to history; transcript entry `{"step", "phase", "state", "instructions", "menu", "answer": {"choice", "probabilities", "confidence", "model", "usage"}, "actions": len(chunk.actions)}`; every `Action` in every returned chunk (including hold and stall chunks) carries `meta["jev"] = {"phase", "arm", "choice", "confidence", "held": bool, "world": {obj: {arm: [x, y, z], "seen_ago": int}}}` so the scorer can read the final world from `record.steps[-1].action.meta` (scoring runs before `on_trial_end`; approvers preserve `meta`). `on_trial_end` still writes the summary to `record.metadata["jev"]` for the log. `DecisionsError` propagates (core wraps it as `PolicyError`).
 
 `info`: `PolicyInfo(name="jev", action_space=<placeholder Box until bind>)`; `bind` replaces `self.info` with the embodiment's action space, mirroring the agent plugin's embodiment-adaptive pattern.
 
@@ -1612,5 +1629,7 @@ inspect-robots "put the cube in the bowl" --policy jev \
 **Critique round 1 (fresh-context subagent, 2026-09-19):** 6 major, 6 minor, 2 nits, all folded into this revision: scorer reads the last step's `Action.meta` because `eval()` scores before `on_trial_end`; `Task(scorer=...)` replaces the non-existent `eval(scorer=)`; tag-frame z points into the tag so face offsets are `+half`; YAM captures at a fixed 640 × 480 so a companion `capture_width/height` change is required (Task 14); positional goals are clamped into workspace bounds so the 0.03 m `z` floor cannot deadlock `descend`/`lower`; `ci-ok` needs, `uv.lock`, and the `pypi-jev` environment are called out; uint8 grayscale and single detector construction; `request_stop` on `Action.meta`; arm choice by base distance; motion test without `max_step`; serializer key renamed to `target_point_…` and thresholds sourced from `TaskConfig`; calibrate CLI reads `.npy`; `build_menu` signature and scorer name aligned.
 
 **Critique round 2 (fresh-context subagent, 2026-09-19):** all round-1 fixes verified present in plan and code; 2 major, 6 minor, 3 nits, all folded in: `max_steps` counts control ticks, not decisions (§0, §6, Task 12 → 600, Task 14 → 600 + `gripper_max_step`); a `reopen` phase after closing on air (Task 5, §3.1a, serializer); `Task(scenes=[...])` not `ListSceneDataset`; scorer requires the cube to be re-seen after release (`held`/`seen_ago` in `meta["jev"]`); chunks interpolate from the last commanded target; `closed_on_air` in `TaskConfig`; `held` window and top-down occlusion note spelled out; `jev_policy` coercion rules; `pose_t.reshape(3)`; `$HOME` in the recipe; `FakeRig` never terminates.
+
+**Code review round 2 (fresh eyes, 2026-09-19):** 3 major, 2 minor, all folded in: `retreat → done` could fire while the gripper still hid the cube (scorer false negative) → new `verify` phase; `lower`/`descend` deadlocked on contact when the computed goal was unreachable → contact rule + command/measured resync; the e2e fake rig saw through the gripper → occlusion and shallow-bowl models, e2e parametrised over four rigs; stalls in `approach`/`carry` now rise instead of hold; held window wording aligned.
 
 **Type consistency:** `Move(arm, axis, delta_m, gripper)` used identically in T4/T7/T10; `WorldState.offset/steps_since_seen` in T5/T6/T10; `Phase(name, arm, target, menu_kind, goal)` in T5/T6/T10; `ChoiceAnswer` fields in T3/T10; `Calibration.to_arm` in T8/T9; `GripperView(position, opening)` in T2/T5/T9/T10.

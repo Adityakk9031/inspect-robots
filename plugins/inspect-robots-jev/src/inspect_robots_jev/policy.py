@@ -36,6 +36,9 @@ from inspect_robots_jev.world import ARMS, Arm, GripperView, Vec3, WorldState
 _HELD_PHASES = frozenset({"lift", "carry", "lower"})
 #: Free-space steering phases: the only ones that stall when the target tag goes stale.
 _STALE_GATED = frozenset({"approach", "carry"})
+#: Commanded-vs-measured divergence (any axis) beyond which the next chunk restarts
+#: from the measured pose instead of the last command.
+_RESYNC_M = 0.02
 
 
 @dataclass(frozen=True)
@@ -146,16 +149,25 @@ class JevPolicy(PolicyBase):
         # tracking lag never shows up as a spurious delta clamp on the first tick
         # and a hold repeats the command instead of walking the arm back.
         start = self._last_target if self._last_target is not None else eef
+        if self._last_target is not None and bool(
+            np.any(np.abs(self._last_target - eef) > _RESYNC_M)
+        ):
+            # the arm could not follow (contact, IK hold): stop commanding from a
+            # phantom pose and restart from where the arm really is
+            start = eef
+            self._last_target = None
         if self._machine is None:
             if cfg.task.cube not in world.objects or cfg.task.bowl not in world.objects:
-                return self._stall(mapper, start, world, None, "cube or bowl not yet seen")
+                return self._stall(
+                    mapper, start, world, None, "cube or bowl not yet seen", None, tick
+                )
             self._machine = PhaseMachine(cfg.task, bounds=self._bounds)
             phase = self._machine.reset(world)
         else:
             phase = self._machine.advance(world)
         self._held = (phase.arm, cfg.task.cube) if phase.name in _HELD_PHASES else None
         if phase.name == "done":
-            return self._finish(mapper, start, world, phase)
+            return self._finish(mapper, start, world, phase, held_for_world, tick)
         # Only the free-space steering phases wait for a fresh sighting. In
         # descend/lower the target is under the gripper and its tag is expected
         # to be hidden; the goal is the remembered pose the state text already
@@ -165,7 +177,7 @@ class JevPolicy(PolicyBase):
             or world.steps_since_seen(phase.target) > cfg.stale_after
         ):
             return self._stall(
-                mapper, start, world, phase, f"{phase.target} tag not seen", held_for_world
+                mapper, start, world, phase, f"{phase.target} tag not seen", held_for_world, tick
             )
         state = build_state(
             world,
@@ -286,24 +298,43 @@ class JevPolicy(PolicyBase):
         phase: Phase | None,
         why: str,
         held: tuple[Arm, str] | None = None,
+        tick: int = -1,
     ) -> ActionChunk:
         self._stalls += 1
         self._transcript.append(
             {
                 "step": world.step,
+                "tick": tick,
                 "phase": phase.name if phase is not None else None,
                 "stall": True,
                 "reason": why,
             }
         )
         summary = self._summary(phase, world, choice=HOLD, confidence=None, held=held)
-        return self._hold(mapper, eef, {"jev": {**summary, "stall": why}})
+        meta = {"jev": {**summary, "stall": why}}
+        if phase is not None:
+            # The likeliest reason the tag is unseen is the gripper hovering over
+            # it, so holding would never let it reappear: rise instead. Bounded by
+            # the action box like every other move.
+            rise = Move(phase.arm, "z", self.settings.task.hover_m, None)
+            chunk = mapper.chunk(rise, eef)
+            self._last_target = np.asarray(chunk.actions[-1].data, dtype=np.float64)
+            return self._with_meta(chunk, meta)
+        return self._hold(mapper, eef, meta)
 
     def _finish(
-        self, mapper: MotionMapper, eef: Any, world: WorldState, phase: Phase
+        self,
+        mapper: MotionMapper,
+        eef: Any,
+        world: WorldState,
+        phase: Phase,
+        held: tuple[Arm, str] | None,
+        tick: int,
     ) -> ActionChunk:
-        self._transcript.append({"step": world.step, "phase": "done", "request_stop": True})
-        summary = self._summary(phase, world, choice=HOLD, confidence=None, held=None)
+        self._transcript.append(
+            {"step": world.step, "tick": tick, "phase": "done", "request_stop": True}
+        )
+        summary = self._summary(phase, world, choice=HOLD, confidence=None, held=held)
         return self._hold(
             mapper, eef, {"request_stop": True, "stop_reason": "task_done", "jev": summary}
         )

@@ -12,7 +12,7 @@ the YAM arms from AprilTag world state. Spec and task list:
 | `world.py` | `Vec3`, `ObjectView`, `GripperView`, `WorldState`, direction words, `describe_offset` |
 | `_decisions.py` | `DecisionsClient` for OpenRouter alpha / TypeSafe direct; injectable `http_post` |
 | `menu.py` | `Move`, `build_menu`, `parse_option` (option-id grammar) |
-| `phase.py` | `TaskConfig`, `Phase`, `PhaseMachine` (cube-into-bowl) |
+| `phase.py` | `TaskConfig`, `Phase`, `PhaseMachine` (cube-into-bowl incl. `reopen`, `verify`, contact rule) |
 | `serializer.py` | `build_state`, `instructions_for` — curated state text in directional words |
 | `motion.py` | `MotionMapper`: menu pick → bounded absolute Cartesian `ActionChunk` |
 | `calibration.py` | camera→arm transforms from a touched table tag; JSON load/save |

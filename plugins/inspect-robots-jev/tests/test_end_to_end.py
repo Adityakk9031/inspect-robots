@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 from inspect_robots import eval as ir_eval
 from inspect_robots.scene import Scene
@@ -83,8 +84,13 @@ class GreedyJev:
         return f"{arm}_{axis}_{word}_{fitting[-1]:g}cm"
 
 
-def test_cube_into_bowl_end_to_end(tmp_path: Path) -> None:
-    rig = FakeRig()
+@pytest.mark.parametrize(
+    ("occlude", "floor_z"),
+    [(False, None), (True, None), (True, 0.02), (False, 0.03)],
+    ids=["clear", "occluding-camera", "occluding+shallow-bowl", "shallow-bowl"],
+)
+def test_cube_into_bowl_end_to_end(tmp_path: Path, occlude: bool, floor_z: float | None) -> None:
+    rig = FakeRig(occlude=occlude, floor_z=floor_z)
     cal = Calibration(
         camera_to_arm={"left": np.eye(4), "right": pose_to_matrix(np.eye(3), RIGHT_OFFSET)}
     )
@@ -112,6 +118,9 @@ def test_cube_into_bowl_end_to_end(tmp_path: Path) -> None:
     assert isinstance(transcript, list) and transcript[-1]["phase"] == "done"
     assert rig.holding is False
     assert np.hypot(*(rig.cube[:2] - rig.bowl[:2])) <= 0.04
+    # the trial must not have ended while the cube was still hidden under the gripper
+    last = transcript[-1]
+    assert last["phase"] == "done"
     low, high = np.asarray(BOX.low), np.asarray(BOX.high)
     for cmd in rig.commanded:
         assert np.all(cmd >= low - 1e-12) and np.all(cmd <= high + 1e-12)

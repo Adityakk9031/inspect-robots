@@ -183,12 +183,21 @@ def test_chunks_start_from_last_commanded_target_not_measured_pose() -> None:
     policy, _, _ = make(["left_x_plus_5cm", "left_y_plus_2cm", "hold"])
     first = policy.act(obs())
     assert first.actions[-1].data[0] == pytest.approx(0.25)
-    # the arm lags: measured x is still 0.22, but the next chunk continues from 0.25
-    second = policy.act(obs(left=(0.22, 0.0, 0.20), step=1))
+    # the arm lags a little (1 cm): the next chunk continues from the commanded 0.25
+    second = policy.act(obs(left=(0.24, 0.0, 0.20), step=1))
     assert second.actions[0].data[0] == pytest.approx(0.25)
     assert second.actions[-1].data[1] == pytest.approx(0.02)
-    third = policy.act(obs(left=(0.24, 0.01, 0.20), step=2))
+    third = policy.act(obs(left=(0.245, 0.01, 0.20), step=2))
     np.testing.assert_allclose(third.actions[0].data, second.actions[-1].data)
+
+
+def test_large_divergence_resyncs_to_the_measured_pose() -> None:
+    policy, _, _ = make(["left_x_plus_5cm", "left_y_plus_2cm"])
+    policy.act(obs())  # commands x 0.20 -> 0.25
+    # the arm is blocked at 0.21: 4 cm behind the command, beyond the 2 cm resync band
+    second = policy.act(obs(left=(0.21, 0.0, 0.20), step=1))
+    assert second.actions[0].data[0] == pytest.approx(0.21)
+    assert second.actions[-1].data[1] == pytest.approx(0.02)
 
 
 def test_stall_when_cube_never_seen() -> None:
@@ -231,7 +240,8 @@ def test_done_requests_stop_and_gripper_phase_menu() -> None:
     assert client.calls[-1]["instructions"] == "Should the left gripper act now?"
     policy._machine._name = "release"
     policy.act(obs(left=(0.35, -0.10, 0.05), opening=0.3, step=2))
-    policy._machine._name = "retreat"
+    policy._machine._name = "verify"
+    # the cube is visible again (FakePerceiver marks it seen every step) -> done
     chunk = policy.act(obs(left=(0.35, -0.10, 0.20), opening=1.0, step=3))
     assert chunk.actions[0].meta["request_stop"] is True
     assert chunk.actions[0].meta["stop_reason"] == "task_done"

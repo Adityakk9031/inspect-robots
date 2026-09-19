@@ -58,7 +58,15 @@ class Det:
 class FakeRig:
     """Minimal ``Embodiment`` for the jev end-to-end test."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, occlude: bool = False, floor_z: float | None = None) -> None:
+        # occlude: a top-down camera cannot see a tag under the gripper. The cube's
+        # tag is hidden when the gripper is within 2 cm xy and less than 6 cm above
+        # it; the bowl's tag while the gripper is within 4 cm xy and under 10 cm.
+        # floor_z: over the bowl, the fingertips (or the carried cube) stop at this
+        # height: a bowl shallower than the phase machine's bowl_depth_m, so a
+        # commanded descent never reaches its computed goal.
+        self.occlude = occlude
+        self.floor_z = floor_z
         self.info = EmbodimentInfo(
             name="fake-rig",
             action_space=BOX,
@@ -87,6 +95,8 @@ class FakeRig:
         self.commanded.append(target.copy())
         prev_open = self.eef[6]
         self.eef = target.copy()
+        if self.floor_z is not None and np.hypot(*(self.eef[:2] - self.bowl[:2])) <= 0.04:
+            self.eef[2] = max(self.eef[2], self.floor_z)  # the arm stops where it touches
         grip = self.eef[0:3]
         if self.holding:
             self.cube = grip.copy()
@@ -106,11 +116,17 @@ class FakeRig:
     def _over_bowl(self) -> bool:
         return bool(np.hypot(*(self.cube[:2] - self.bowl[:2])) <= 0.04)
 
+    def _hidden(self, obj: np.ndarray, xy_m: float, above_m: float) -> bool:
+        if not self.occlude:
+            return False
+        grip = self.eef[0:3]
+        return bool(np.hypot(*(grip[:2] - obj[:2])) <= xy_m and 0.0 <= grip[2] - obj[2] < above_m)
+
     def detector(self, gray: Any, params: Any, size: float) -> list[Det]:
         dets: list[Det] = []
-        if abs(size - 0.02) < 1e-9 and not self.holding:
+        if abs(size - 0.02) < 1e-9 and not self.holding and not self._hidden(self.cube, 0.02, 0.06):
             dets.append(Det(0, self.cube.copy(), CUBE_HALF))  # top face tag
-        if abs(size - 0.04) < 1e-9:
+        if abs(size - 0.04) < 1e-9 and not self._hidden(self.bowl, 0.04, 0.10):
             dets.append(Det(14, self.bowl.copy(), 0.0))
         if abs(size - 0.08) < 1e-9:
             dets.append(Det(20, np.array([0.30, 0.20, 0.0]), 0.0))

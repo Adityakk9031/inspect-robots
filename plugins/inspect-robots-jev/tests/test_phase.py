@@ -99,10 +99,14 @@ def test_full_happy_path() -> None:
     assert p.name == "release" and p.menu_kind == "grip_open"
     p = m.advance(world(left=(0.35, -0.10, -0.0073), opening=0.9))
     assert p.name == "retreat" and p.goal == pytest.approx((0.35, -0.10, 0.10))
-    assert m.advance(world(left=(0.35, -0.10, 0.10), opening=0.9)).name == "done"
-    p = m.advance(world())
+    p = m.advance(world(left=(0.35, -0.10, 0.10), opening=0.9))
+    assert (p.name, p.menu_kind, p.target) == ("verify", "z", "cube")
+    assert p.goal == pytest.approx((0.35, -0.10, 0.15))
+    # the cube is seen again this step (not inferred from the gripper) -> done
+    p = m.advance(world(left=(0.35, -0.10, 0.15), opening=0.9, cube=(0.35, -0.10, 0.013), step=1))
     assert (p.name, p.menu_kind, p.goal) == ("done", "done", None)
     assert m.phase.name == "done"
+    assert m.advance(world()).name == "done"
 
 
 def test_grasp_on_air_reopens_then_returns_to_approach() -> None:
@@ -139,3 +143,68 @@ def test_lift_goal_without_grasp_point_falls_back_to_cube() -> None:
     m._name = "lift"
     p = m.advance(world(left=(0.30, 0.10, 0.013), opening=0.3))
     assert p.goal == pytest.approx((0.30, 0.10, 0.093))
+
+
+def test_verify_waits_for_a_real_sighting_then_gives_up() -> None:
+    m = PhaseMachine(TaskConfig(verify_decisions=2))
+    m.reset(world())
+    m._name = "verify"
+    # cube view still pinned to the gripper: not a sighting
+    pinned = WorldState(
+        step=5,
+        objects={
+            "cube": ObjectView("cube", {"left": CUBE, "right": CUBE}, 5, from_gripper=True),
+            "bowl": ObjectView("bowl", {"left": BOWL, "right": BOWL}, 5),
+        },
+        grippers={
+            "left": GripperView((0.35, -0.10, 0.15), 1.0),
+            "right": GripperView((0.2, 0.5, 0.2), 1.0),
+        },
+    )
+    assert m.advance(pinned).name == "verify"
+    assert m.advance(pinned).name == "verify"
+    assert m.advance(pinned).name == "done"  # budget spent: end anyway, scorer will fail it
+
+
+def test_verify_ends_on_stale_but_unpinned_view_only_when_fresh() -> None:
+    m = PhaseMachine(TaskConfig())
+    m.reset(world())
+    m._name = "verify"
+    stale = world(left=(0.35, -0.10, 0.15), step=9, cube=CUBE)
+    stale_view = WorldState(
+        step=9,
+        objects={
+            "cube": ObjectView("cube", {"left": CUBE, "right": CUBE}, 4),
+            "bowl": stale.objects["bowl"],
+        },
+        grippers=stale.grippers,
+    )
+    assert m.advance(stale_view).name == "verify"
+    assert m.advance(world(left=(0.35, -0.10, 0.15), step=10)).name == "done"
+
+
+def test_contact_rule_ends_descend_and_lower_when_height_stops_dropping() -> None:
+    cfg = TaskConfig(contact_decisions=3)
+    m = PhaseMachine(cfg)
+    m.reset(world())
+    m._name = "descend"
+    # fingers rest on the table at z=0.05, well above the cube-centre goal (0.013)
+    for _ in range(3):
+        assert m.advance(world(left=(0.30, 0.10, 0.05))).name == "descend"
+    assert m.advance(world(left=(0.30, 0.10, 0.05))).name == "grasp"
+    m._name = "lower"
+    m._grasp_point = (0.30, 0.10, 0.05)
+    for z in (0.10, 0.08, 0.06):  # still descending 2 cm per decision: no contact yet
+        assert m.advance(world(left=(0.35, -0.10, z), opening=0.3)).name == "lower"
+    # the window must be flat for contact_decisions=3 consecutive decisions
+    for _ in range(2):
+        assert m.advance(world(left=(0.35, -0.10, 0.06), opening=0.3)).name == "lower"
+    assert m.advance(world(left=(0.35, -0.10, 0.06), opening=0.3)).name == "release"
+
+
+def test_z_trace_resets_outside_descending_phases() -> None:
+    m = PhaseMachine(TaskConfig())
+    m.reset(world())
+    for _ in range(5):
+        m.advance(world(left=(0.10, 0.10, 0.30)))
+    assert m._z_trace == []

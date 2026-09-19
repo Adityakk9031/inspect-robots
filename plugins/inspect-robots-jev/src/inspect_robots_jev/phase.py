@@ -24,6 +24,7 @@ PhaseName = Literal[
     "lower",
     "release",
     "retreat",
+    "verify",
     "done",
 ]
 #: Which arm/target/menu each phase uses. Target is the object the menu talks about.
@@ -37,6 +38,7 @@ _TARGET: dict[PhaseName, str] = {
     "lower": "bowl",
     "release": "bowl",
     "retreat": "bowl",
+    "verify": "cube",
     "done": "bowl",
 }
 _MENU: dict[PhaseName, MenuKind] = {
@@ -49,6 +51,7 @@ _MENU: dict[PhaseName, MenuKind] = {
     "lower": "z",
     "release": "grip_open",
     "retreat": "z",
+    "verify": "z",
     "done": "done",
 }
 
@@ -68,6 +71,13 @@ class TaskConfig:
     closed_on_air: float = 0.02
     open_threshold: float = 0.8
     cube_half_m: float = 0.0127
+    #: Decisions to wait in ``verify`` for the released cube's tag to be re-detected
+    #: before giving up and ending the trial (the scorer then fails it honestly).
+    verify_decisions: int = 8
+    #: ``descend``/``lower`` count as arrived when the gripper's measured height has
+    #: not dropped by more than ``z_tol_m`` over this many consecutive decisions:
+    #: the fingers (or the carried cube) are resting on something.
+    contact_decisions: int = 3
 
 
 @dataclass(frozen=True)
@@ -116,6 +126,8 @@ class PhaseMachine:
         self._arm: Arm = "left"
         self._grasp_point: Vec3 | None = None
         self._phase: Phase | None = None
+        self._z_trace: list[float] = []
+        self._verify_count = 0
 
     @property
     def phase(self) -> Phase:
@@ -130,6 +142,8 @@ class PhaseMachine:
         self._arm = min(ARMS, key=lambda arm: math.hypot(*cube.in_frame[arm]))
         self._name = "approach"
         self._grasp_point = None
+        self._z_trace = []
+        self._verify_count = 0
         self._phase = self._build(world)
         return self._phase
 
@@ -140,9 +154,15 @@ class PhaseMachine:
         grip = world.grippers[arm]
         current = self._build(world)
         goal = current.goal
+        before = self._name
+        blocked = self._track_contact(grip.position[2])
         if self._name == "approach" and goal is not None and self._near(grip.position, goal):
             self._name = "descend"
-        elif self._name == "descend" and goal is not None and self._near_z(grip.position, goal):
+        elif (
+            self._name == "descend"
+            and goal is not None
+            and (self._near_z(grip.position, goal) or blocked)
+        ):
             self._name = "grasp"
         elif self._name == "grasp":
             if grip.opening <= cfg.closed_on_air:
@@ -158,7 +178,11 @@ class PhaseMachine:
             self._name = "carry"
         elif self._name == "carry" and goal is not None and self._near_xy(grip.position, goal):
             self._name = "lower"
-        elif self._name == "lower" and goal is not None and self._near_z(grip.position, goal):
+        elif (
+            self._name == "lower"
+            and goal is not None
+            and (self._near_z(grip.position, goal) or blocked)
+        ):
             self._name = "release"
         elif self._name == "release" and grip.opening >= cfg.open_threshold:
             self._name = "retreat"
@@ -167,9 +191,33 @@ class PhaseMachine:
             and goal is not None
             and grip.position[2] >= goal[2] - cfg.z_tol_m
         ):
-            self._name = "done"
+            self._name = "verify"
+        elif self._name == "verify":
+            # The trial may only end once the released cube has been SEEN again
+            # (not inferred from the gripper), or the wait budget is spent.
+            cube = world.objects.get(cfg.cube)
+            seen = (
+                cube is not None and not cube.from_gripper and world.steps_since_seen(cfg.cube) == 0
+            )
+            self._verify_count += 1
+            if seen or self._verify_count > cfg.verify_decisions:
+                self._name = "done"
+        if self._name != before:
+            self._z_trace = []
         self._phase = self._build(world)
         return self._phase
+
+    def _track_contact(self, z: float) -> bool:
+        """Record the gripper height; True when it has stopped descending (contact)."""
+        if self._name not in ("descend", "lower"):
+            self._z_trace = []
+            return False
+        self._z_trace.append(z)
+        n = self._cfg.contact_decisions + 1
+        if len(self._z_trace) < n:
+            return False
+        window = self._z_trace[-n:]
+        return (window[0] - min(window)) <= self._cfg.z_tol_m
 
     # -- helpers -----------------------------------------------------------
 
@@ -182,7 +230,9 @@ class PhaseMachine:
         name = self._name
         if _MENU[name] in ("grip_close", "grip_open", "done"):
             return None
-        target = world.objects[self._target_name()].in_frame[arm]
+        # verify talks about the cube but rises above the bowl, where the arm is
+        anchor = cfg.bowl if name == "verify" else self._target_name()
+        target = world.objects[anchor].in_frame[arm]
         if name == "approach":
             goal = _add(target, cfg.hover_m)
         elif name == "descend":
@@ -194,8 +244,10 @@ class PhaseMachine:
             goal = _add(target, cfg.hover_m + cfg.cube_half_m)
         elif name == "lower":
             goal = _add(target, cfg.cube_half_m - cfg.bowl_depth_m)
-        else:  # retreat
+        elif name == "retreat":
             goal = _add(target, cfg.lift_m)
+        else:  # verify: keep rising so the gripper clears the camera's view of the cube
+            goal = _add(target, cfg.lift_m + cfg.hover_m)
         return _clamp(goal, self._bounds)
 
     def _build(self, world: WorldState) -> Phase:

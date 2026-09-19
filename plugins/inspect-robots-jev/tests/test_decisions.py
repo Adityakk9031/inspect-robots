@@ -232,3 +232,10 @@ def test_non_json_and_non_object_bodies_raise_decisions_error() -> None:
         DecisionsClient(api_key="k", http_post=RawPost(b"[1, 2]")).choose(
             state="s", instructions="i", criteria={"a": "A"}
         )
+
+
+def test_synthetic_599_is_retried_through_choose() -> None:
+    post = FakePost([(599, {}, {"error": "connection error"}), (200, {}, OK)])
+    client = DecisionsClient(api_key="k", http_post=post, sleep=lambda s: None)
+    assert client.choose(state="s", instructions="i", criteria={"a": "A", "b": "B"}).choice == "a"
+    assert len(post.calls) == 2
