@@ -126,7 +126,7 @@ class PhaseMachine:
         self._arm: Arm = "left"
         self._grasp_point: Vec3 | None = None
         self._phase: Phase | None = None
-        self._z_trace: list[float] = []
+        self._z_trace: list[tuple[float, float]] = []  # (measured z, commanded descent)
         self._verify_count = 0
 
     @property
@@ -147,12 +147,15 @@ class PhaseMachine:
         self._phase = self._build(world)
         return self._phase
 
-    def advance(self, world: WorldState, *, descended: bool = True) -> Phase:
+    def advance(self, world: WorldState, *, descended_m: float = 1.0) -> Phase:
         """Apply at most one transition for this world snapshot and return the phase.
 
-        ``descended`` says whether the previous decision actually commanded a
-        downward move; the contact rule only counts those, so holds or small
-        sideways picks never masquerade as "resting on something".
+        ``descended_m`` is how far the previous decision commanded the gripper
+        DOWN (0 for holds, gripper moves, sideways or upward picks). The
+        contact rule counts only those decisions and fires only when the
+        commanded descent over its window exceeded ``z_tol_m`` while the
+        measured height barely changed, so tiny picks that the arm under-
+        travels never masquerade as "resting on something".
         """
         cfg = self._cfg
         arm = self._arm
@@ -160,7 +163,7 @@ class PhaseMachine:
         current = self._build(world)
         goal = current.goal
         before = self._name
-        blocked = self._track_contact(grip.position[2], descended)
+        blocked = self._track_contact(grip.position[2], descended_m)
         if self._name == "approach" and goal is not None and self._near(grip.position, goal):
             self._name = "descend"
         elif (
@@ -212,23 +215,26 @@ class PhaseMachine:
         self._phase = self._build(world)
         return self._phase
 
-    def _track_contact(self, z: float, descended: bool) -> bool:
+    def _track_contact(self, z: float, descended_m: float) -> bool:
         """Record the gripper height after each commanded descent; True on contact.
 
         Contact means the last ``contact_decisions + 1`` recorded heights span
-        no more than ``z_tol_m`` although every one followed a DOWN command.
+        no more than ``z_tol_m`` although the DOWN commands that produced them
+        asked for more than ``z_tol_m`` of travel in total.
         """
         if self._name not in ("descend", "lower"):
             self._z_trace = []
             return False
-        if not descended:
+        if descended_m <= 0.0:
             return False
-        self._z_trace.append(z)
+        self._z_trace.append((z, descended_m))
         n = self._cfg.contact_decisions + 1
         if len(self._z_trace) < n:
             return False
         window = self._z_trace[-n:]
-        return (max(window) - min(window)) <= self._cfg.z_tol_m
+        heights = [h for h, _ in window]
+        commanded = sum(d for _, d in window[1:])
+        return (max(heights) - min(heights)) <= self._cfg.z_tol_m < commanded
 
     # -- helpers -----------------------------------------------------------
 

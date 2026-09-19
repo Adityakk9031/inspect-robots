@@ -202,6 +202,22 @@ def test_contact_rule_ends_descend_and_lower_when_height_stops_dropping() -> Non
     assert m.advance(world(left=(0.35, -0.10, 0.06), opening=0.3)).name == "release"
 
 
+def test_contact_rule_needs_real_commanded_descent() -> None:
+    # four 0.5 cm DOWN picks that the arm under-travels to 0.3 cm each: span 0.9 cm
+    # (<= z_tol) but the commanded descent (1.5 cm) exceeds z_tol -> contact fires;
+    # with 0.2 cm picks (0.6 cm commanded over the window) it must not.
+    m = PhaseMachine(TaskConfig(contact_decisions=3))
+    m.reset(world())
+    m._name = "descend"
+    for z in (0.100, 0.097, 0.094, 0.091):
+        p = m.advance(world(left=(0.30, 0.10, z)), descended_m=0.002)
+    assert p.name == "descend"
+    m._z_trace = []
+    for z in (0.100, 0.097, 0.094):
+        assert m.advance(world(left=(0.30, 0.10, z)), descended_m=0.005).name == "descend"
+    assert m.advance(world(left=(0.30, 0.10, 0.091)), descended_m=0.005).name == "grasp"
+
+
 def test_z_trace_resets_outside_descending_phases() -> None:
     m = PhaseMachine(TaskConfig())
     m.reset(world())
@@ -220,5 +236,5 @@ def test_contact_rule_ignores_rising_and_uncommanded_decisions() -> None:
     m._z_trace = []
     # flat height but no DOWN was commanded (holds): not contact either
     for _ in range(5):
-        assert m.advance(world(left=(0.30, 0.10, 0.08)), descended=False).name == "descend"
+        assert m.advance(world(left=(0.30, 0.10, 0.08)), descended_m=0.0).name == "descend"
     assert m._z_trace == []

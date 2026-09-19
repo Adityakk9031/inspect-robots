@@ -36,8 +36,9 @@ from inspect_robots_jev.world import ARMS, AXES, Arm, GripperView, Vec3, WorldSt
 _HELD_PHASES = frozenset({"lift", "carry", "lower"})
 #: Free-space steering phases: the only ones that stall when the target tag goes stale.
 _STALE_GATED = frozenset({"approach", "carry"})
-#: Commanded-vs-measured divergence (any axis) beyond which the next chunk restarts
-#: from the measured pose instead of the last command.
+#: Commanded-vs-measured divergence on the active arm's x/y/z beyond which the next
+#: chunk's position interpolation restarts from the measured pose (gripper and
+#: orientation keep their commanded values).
 _RESYNC_M = 0.02
 
 
@@ -169,12 +170,11 @@ class JevPolicy(PolicyBase):
             self._machine = PhaseMachine(cfg.task, bounds=self._bounds)
             phase = self._machine.reset(world)
         else:
-            descended = (
-                self._last_move is not None
-                and self._last_move.axis == "z"
-                and self._last_move.delta_m < 0
+            last = self._last_move
+            descended_m = (
+                -last.delta_m if last is not None and last.axis == "z" and last.delta_m < 0 else 0.0
             )
-            phase = self._machine.advance(world, descended=descended)
+            phase = self._machine.advance(world, descended_m=descended_m)
         self._held = (phase.arm, cfg.task.cube) if phase.name in _HELD_PHASES else None
         if phase.name == "done":
             return self._finish(mapper, start, world, phase, held_for_world, tick)
@@ -304,7 +304,7 @@ class JevPolicy(PolicyBase):
     def _stall(
         self,
         mapper: MotionMapper,
-        eef: Any,
+        start: Any,
         world: WorldState,
         phase: Phase | None,
         why: str,
@@ -328,11 +328,11 @@ class JevPolicy(PolicyBase):
             # it, so holding would never let it reappear: rise instead. Bounded by
             # the action box like every other move.
             rise = Move(phase.arm, "z", self.settings.task.hover_m, None)
-            chunk = mapper.chunk(rise, eef)
+            chunk = mapper.chunk(rise, start)
             self._last_target = np.asarray(chunk.actions[-1].data, dtype=np.float64)
             self._last_move = rise
             return self._with_meta(chunk, meta)
-        return self._hold(mapper, eef, meta)
+        return self._hold(mapper, start, meta)
 
     def _finish(
         self,
