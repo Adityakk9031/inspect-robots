@@ -20,6 +20,7 @@ _TASK: dict[str, str] = {
     ),
     "descend": "Lower the {arm} gripper straight down onto the {target}.",
     "grasp": "Close the {arm} gripper on the {target}.",
+    "reopen": "The {arm} gripper closed on nothing. Open it again before retrying the {target}.",
     "lift": "Raise the {arm} gripper straight up, carrying the {target}.",
     "carry": (
         "Move the {arm} gripper to the target point above the {target}, carrying the cube. "

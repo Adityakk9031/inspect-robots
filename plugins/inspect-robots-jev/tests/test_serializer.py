@@ -72,7 +72,7 @@ def test_every_phase_has_task_text() -> None:
     ):
         phase = Phase(name, "right", "bowl", kind, (0.3, 0.4, 0.1))  # type: ignore[arg-type]
         assert "right gripper" in build_state(world(), phase, [])["task"]
-    for name, kind in (("release", "grip_open"), ("done", "done")):
+    for name, kind in (("release", "grip_open"), ("reopen", "grip_open"), ("done", "done")):
         phase = Phase(name, "right", "bowl", kind, None)  # type: ignore[arg-type]
         assert build_state(world(), phase, [])["task"]
 

@@ -23,8 +23,11 @@ Read these first. Each term is used in the sense given here.
 - **Action / ActionChunk** — what the policy hands back: one or more small
   motion commands, played one per control tick.
 - **Rollout / trial** — one attempt at the task, from reset to done or
-  timeout. **`max_steps`** is the cap on how many policy decisions a trial
-  may take.
+  timeout. **`max_steps`** caps the number of *control ticks* (one per
+  action played), not Jev decisions: one Jev pick becomes several ticks (a
+  5 cm move is 4 ticks, a full gripper close about 20 at the default 5 %
+  per-tick limit), so a nominal cube-into-bowl run needs roughly 150 ticks
+  and budgets below are set to 600.
 - **Scorer** — code that decides whether a trial succeeded and writes the
   score into the log.
 - **Guardrails** — safety filters that already sit between the policy and
@@ -194,7 +197,8 @@ plugins/inspect-robots-jev/
 |---|---|---|---|
 | approach | steer the open gripper to hover above the cube | 6 directions × 3 step sizes + hold | gripper within 1 cm of the point 5 cm above the cube |
 | descend | lower onto the cube | UP/DOWN steps + hold | grasp point within 1 cm of cube centre height |
-| grasp | close | close / hold | gripper reads closed on something (position stops short of fully closed) |
+| grasp | close | close / hold | gripper reads closed on something (opening ≤ `closed_on_object` but > `closed_on_air`); closed on air (≤ `closed_on_air`) → `reopen` |
+| reopen | open again after closing on nothing | open / hold | gripper reads open (≥ `open_threshold`); then back to `approach` |
 | lift | raise | UP steps + hold | cube tag (or gripper) 8 cm above table |
 | carry | steer to hover above the bowl centre | 6 directions × 3 step sizes + hold | within 1.5 cm above the bowl centre |
 | lower | descend into the bowl | UP/DOWN steps + hold | grasp point below bowl rim height |
@@ -339,8 +343,10 @@ Guardrails unchanged. On top of that: the largest menu step (5 cm) bounds
 any single decision; the phase machine only allows a grasp when the gripper
 is within tolerance; every positional goal is clamped into the arm's
 configured workspace bounds before the tolerance test, so a goal below the
-`z` floor (default 0.03 m) cannot deadlock a phase; and `max_steps` on the
-task stops a trial that stalls.
+`z` floor (default 0.03 m) cannot deadlock a phase; a gripper that closes on
+nothing goes through a `reopen` phase before the approach is retried, so it
+cannot loop closed; and `max_steps` on the task (control ticks, set to 600)
+stops a trial that stalls.
 In the test, a successful approach took about 11 to 12 decisions.
 
 ## 7. Settings
@@ -1211,7 +1217,7 @@ def parse_option(option_id: str) -> Move:
 - Produces:
 
 ```python
-PhaseName = Literal["approach", "descend", "grasp", "lift", "carry", "lower", "release", "retreat", "done"]
+PhaseName = Literal["approach", "descend", "grasp", "reopen", "lift", "carry", "lower", "release", "retreat", "done"]
 
 @dataclass(frozen=True)
 class TaskConfig:
@@ -1223,6 +1229,7 @@ class TaskConfig:
     lift_m: float = 0.08            # lift height above cube's table height
     bowl_depth_m: float = 0.04      # how far below the bowl tag height counts as "in"
     closed_on_object: float = 0.35  # gripper opening ≤ this while closed on the cube
+    closed_on_air: float = 0.02     # ≤ this means the jaws met: nothing was grasped
     open_threshold: float = 0.8
     cube_half_m: float = 0.0127
 
@@ -1254,7 +1261,8 @@ clamped into `bounds`.
 Transition rules (evaluated in order, one transition per call):
 - `approach`: goal = clamp(cube + (0,0,hover)). → `descend` when xy within `xy_tol` and z within `z_tol` of goal.
 - `descend`: goal = clamp(cube centre). menu `z`. → `grasp` when z within `z_tol`. (On the rig the clamp raises this to the `z` floor when the cube centre is below it; set `eef_low` z per rig so the fingertips can reach the cube.)
-- `grasp`: menu `grip_close`. → `lift` when gripper opening ≤ `closed_on_object` and > 0.02 (closed on something, not on nothing). If opening ≤ 0.02 (closed on air) → back to `approach`.
+- `grasp`: menu `grip_close`. → `lift` when gripper opening ≤ `closed_on_object` and > `closed_on_air` (closed on something). If opening ≤ `closed_on_air` (closed on air) → `reopen`.
+- `reopen`: menu `grip_open`, target cube. → `approach` when opening ≥ `open_threshold`. (Without this phase a closed-on-air gripper would bounce grasp → approach → descend → grasp forever, since approach/descend menus cannot open it.)
 - `lift`: goal = grasp position + (0,0,lift). menu `z`. → `carry` when z ≥ goal z − z_tol.
 - `carry`: goal = bowl + (0,0,hover + cube_half). menu `xyz`. → `lower` when xy within `xy_tol`.
 - `lower`: goal = clamp(bowl − (0,0,bowl_depth) + cube_half). menu `z`. → `release` when z within z_tol.
@@ -1336,7 +1344,7 @@ def build_state(world: WorldState, phase: Phase, history: Sequence[str], *, hist
 def instructions_for(phase: Phase) -> str
 ```
 
-`build_state(world, phase, history, *, history_len=5, open_threshold=0.8, closed_threshold=0.35)` output keys, in this order: `task` (one sentence per phase, see table; it names the target point), `target_point_relative_to_<arm>_gripper` (list from `describe_offset(goal, gripper)` — the *goal* point, e.g. 5 cm above the cube, is what Jev steers to, so the key says "target point", not the object's name; for gripper phases this key **and** `straight_line_distance_cm` are omitted), `straight_line_distance_cm` (rounded to 0.1), `<arm>_gripper` (`"open"`/`"closed"`/`"partly closed"` from opening ≥ `open_threshold` / ≤ `closed_threshold` / else; the policy passes `TaskConfig.open_threshold` and `closed_on_object` so the two never drift), `other_objects_on_table_ignore_them` (sorted names except the target), `recent_moves_oldest_first` (last `history_len` entries of `history`, which the policy fills with menu *descriptions* truncated before `;`), and `note` only when `world.steps_since_seen(target) > 0`: `"the <target> was last seen <n> moves ago; assume it has not moved"`.
+`build_state(world, phase, history, *, history_len=5, open_threshold=0.8, closed_threshold=0.35)` output keys (reopen → `The {arm} gripper closed on nothing. Open it again before retrying the {target}.`), in this order: `task` (one sentence per phase, see table; it names the target point), `target_point_relative_to_<arm>_gripper` (list from `describe_offset(goal, gripper)` — the *goal* point, e.g. 5 cm above the cube, is what Jev steers to, so the key says "target point", not the object's name; for gripper phases this key **and** `straight_line_distance_cm` are omitted), `straight_line_distance_cm` (rounded to 0.1), `<arm>_gripper` (`"open"`/`"closed"`/`"partly closed"` from opening ≥ `open_threshold` / ≤ `closed_threshold` / else; the policy passes `TaskConfig.open_threshold` and `closed_on_object` so the two never drift), `other_objects_on_table_ignore_them` (sorted names except the target), `recent_moves_oldest_first` (last `history_len` entries of `history`, which the policy fills with menu *descriptions* truncated before `;`), and `note` only when `world.steps_since_seen(target) > 0`: `"the <target> was last seen <n> moves ago; assume it has not moved"`.
 
 Task sentences: approach → `Move the {arm} gripper to the target point 5 cm above the {target}. Move toward that point, never away.`; descend → `Lower the {arm} gripper straight down onto the {target}.`; grasp → `Close the {arm} gripper on the {target}.`; lift → `Raise the {arm} gripper straight up, carrying the {target}.`; carry → `Move the {arm} gripper to the target point above the {target}, carrying the cube. Move toward that point, never away.`; lower → `Lower the {arm} gripper into the {target}.`; release → `Open the {arm} gripper to drop the cube into the {target}.`; retreat → `Raise the {arm} gripper straight up, away from the {target}.`; done → `The task is complete.`
 
@@ -1365,6 +1373,10 @@ class MotionMapper:
     def gripper_position(self, eef_state: npt.NDArray[np.floating[Any]], arm: Arm) -> Vec3
     def gripper_opening(self, eef_state: ..., arm: Arm) -> float
     def chunk(self, move: Move, current: npt.NDArray[np.floating[Any]]) -> ActionChunk
+        # `current` is the pose to interpolate FROM. The policy passes its last commanded
+        # target when one exists in this trial (else the measured eef_state), so IK tracking
+        # lag never appears as a spurious delta clamp on the first tick and a hold repeats the
+        # last command instead of walking the arm back toward its measured pose.
         # hold -> one Action equal to `current` clipped to bounds
         # axis move -> target = current; target[idx] += delta; clip; split into
         #   n = max(1, ceil(|delta| / step_limit)) actions linearly interpolated (last == target)
@@ -1490,7 +1502,8 @@ class JevPolicyConfig:
     task: TaskConfig = TaskConfig()
 
 class JevPolicy(PolicyBase):
-    def __init__(self, config: JevPolicyConfig, *, client: DecisionsClient | None = None,
+    settings: JevPolicyConfig      # NOT `config`: PolicyBase.config is the core PolicyConfig recorded in the log
+    def __init__(self, config: JevPolicyConfig | None = None, *, client: DecisionsClient | None = None,
                  perceiver: Perceiver | None = None) -> None
     def bind(self, embodiment_info: EmbodimentInfo) -> None      # builds MotionMapper from embodiment action space; adopts info.action_space;
                                                                  # builds PhaseMachine(config.task, bounds=(low_xyz, high_xyz) of the active labels)
@@ -1500,10 +1513,13 @@ class JevPolicy(PolicyBase):
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None
         # record.metadata["jev"] = {"final_phase": ..., "final_world": {obj: {arm: [x,y,z]}}, "decisions": n, "stalls": n}
 
-def jev_policy(**kwargs: Any) -> JevPolicy   # registry entry: parses -P k=v strings (steps_cm "0.5,2,5"), builds config
+def jev_policy(**kwargs: Any) -> JevPolicy   # registry entry. Every -P value arrives as str: steps_cm "0.5,2,5" -> tuple[float],
+                                             # history/stale_after -> int, cube=/bowl= -> TaskConfig names. Other TaskConfig
+                                             # tolerances are NOT CLI-tunable in v1 (construct JevPolicyConfig in Python).
+                                             # Unknown keys -> TypeError.
 ```
 
-`act` algorithm: `eef = observation.state["eef_state"]`; grippers from the mapper; `world = perceiver.update(...)` with `held` set when phase ∈ {grasp-succeeded…lower}; on the first act after reset, `phase = machine.reset(world)` else `machine.advance(world)`. If `phase.name == "done"` → hold chunk whose single `Action.meta` carries `{"request_stop": True, "stop_reason": "task_done", "jev": {...}}` (the rollout reads `request_stop` from `Action.meta`, not chunk meta). If target missing from world or `steps_since_seen > stale_after` and phase is positional → hold chunk, `stalls += 1`, transcript entry with `"stall": True`. Else `state = build_state(...)`, `menu = build_menu(...)`, `answer = client.choose(...)`, `move = parse_option(answer.choice)`, `chunk = mapper.chunk(move, eef)`; append `menu[answer.choice].split(";")[0]` to history; transcript entry `{"step", "phase", "state", "instructions", "menu", "answer": {"choice", "probabilities", "confidence", "model", "usage"}, "actions": len(chunk.actions)}`; every `Action` in every returned chunk (including hold and stall chunks) carries `meta["jev"] = {"phase", "choice", "confidence", "world": {obj: {arm: [x, y, z]}}}` so the scorer can read the final world from `record.steps[-1].action.meta` (scoring runs before `on_trial_end`; approvers preserve `meta`). `on_trial_end` still writes the summary to `record.metadata["jev"]` for the log. `DecisionsError` propagates (core wraps it as `PolicyError`).
+`act` algorithm: `eef = observation.state["eef_state"]`; grippers from the mapper; `start = last commanded target if any else eef`; `world = perceiver.update(..., held=self._held)` where `self._held` was set at the end of the *previous* step as `(phase.arm, cfg.task.cube) if phase.name in ("lift", "carry", "lower") else None` (the world for this step is built before `advance`). Note: with a top-down camera the cube's top tag is hidden by the gripper during `descend`/`grasp`, so the stale counter runs there; the default `stale_after=10` covers the 3–5 decisions those phases take, which is why the budget is not smaller; on the first act after reset, `phase = machine.reset(world)` else `machine.advance(world)`. If `phase.name == "done"` → hold chunk whose single `Action.meta` carries `{"request_stop": True, "stop_reason": "task_done", "jev": {...}}` (the rollout reads `request_stop` from `Action.meta`, not chunk meta). If target missing from world or `steps_since_seen > stale_after` and phase is positional → hold chunk, `stalls += 1`, transcript entry with `"stall": True`. Else `state = build_state(...)`, `menu = build_menu(...)`, `answer = client.choose(...)`, `move = parse_option(answer.choice)`, `chunk = mapper.chunk(move, eef)`; append `menu[answer.choice].split(";")[0]` to history; transcript entry `{"step", "phase", "state", "instructions", "menu", "answer": {"choice", "probabilities", "confidence", "model", "usage"}, "actions": len(chunk.actions)}`; every `Action` in every returned chunk (including hold and stall chunks) carries `meta["jev"] = {"phase", "arm", "choice", "confidence", "held": bool, "world": {obj: {arm: [x, y, z], "seen_ago": int}}}` so the scorer can read the final world from `record.steps[-1].action.meta` (scoring runs before `on_trial_end`; approvers preserve `meta`). `on_trial_end` still writes the summary to `record.metadata["jev"]` for the log. `DecisionsError` propagates (core wraps it as `PolicyError`).
 
 `info`: `PolicyInfo(name="jev", action_space=<placeholder Box until bind>)`; `bind` replaces `self.info` with the embodiment's action space, mirroring the agent plugin's embodiment-adaptive pattern.
 
@@ -1520,11 +1536,11 @@ def jev_policy(**kwargs: Any) -> JevPolicy   # registry entry: parses -P k=v str
 
 **Interfaces:**
 ```python
-def cube_in_bowl(*, cube: str = "cube", bowl: str = "bowl", radius_m: float = 0.04, max_above_m: float = 0.03) -> Scorer
+def cube_in_bowl(*, cube: str = "cube", bowl: str = "bowl", radius_m: float = 0.04, max_above_m: float = 0.03, max_unseen: int = 3) -> Scorer
 ```
-Reads `record.steps[-1].action.meta["jev"]["world"]` (scoring runs before `on_trial_end`, so `record.metadata` is not available; approvers preserve `Action.meta`). Success when, in the arm frame used by the policy (`world[cube]` and `world[bowl]` share keys; use `"left"` if present else `"right"`), horizontal distance ≤ `radius_m` and `cube_z − bowl_z ≤ max_above_m`. No steps or missing meta → `Score(value=False, explanation="no jev world state recorded")`. `name == "jev_cube_in_bowl"` (same as the entry point).
+Reads `record.steps[-1].action.meta["jev"]` (scoring runs before `on_trial_end`, so `record.metadata` is not available; approvers preserve `Action.meta`). Success requires **all** of: the cube's tag was actually re-detected after release, i.e. `meta["held"] is False` and `world[cube]["seen_ago"] <= max_unseen` (default 3) — otherwise the last pose is the in-gripper estimate and would score a cube stuck in the jaws as "in the bowl"; and, in the arm frame used by the policy (`"left"` if present else `"right"`), horizontal distance ≤ `radius_m` and `cube_z − bowl_z ≤ max_above_m`. No steps or missing meta → `Score(value=False, explanation="no jev world state recorded")`. `name == "jev_cube_in_bowl"` (same as the entry point).
 
-- [ ] **Steps 1–5:** tests for success, horizontal miss, cube left on the rim (too high), missing metadata; implement (≤ 40 lines); commit `feat(jev): pose-based cube_in_bowl scorer`.
+- [ ] **Steps 1–5:** tests for success, horizontal miss, cube left on the rim (too high), cube still held / not re-seen after release, missing metadata; implement (≤ 40 lines); commit `feat(jev): pose-based cube_in_bowl scorer`.
 
 ---
 
@@ -1533,9 +1549,9 @@ Reads `record.steps[-1].action.meta["jev"]["world"]` (scoring runs before `on_tr
 **Files:**
 - Create: `tests/test_end_to_end.py`, `tests/_fake_rig.py`
 
-`_fake_rig.py`: a minimal `Embodiment` with the 14-dim YAM-like absolute Cartesian action box (labels as in Task 7), `eef_state` observation, a `top_cam` image (zeros, 64×64×3), `top_cam_intrinsics`, a kinematic toy world where a "cube" and "bowl" have fixed positions, the gripper closes to 0.3 when within 1.5 cm of the cube, the cube follows the gripper while closed, and a `FakeDetector` that reports tags at the true object positions (so the perceiver sees a consistent world). A scripted `FakeClient` that always picks the greedy-best option from the menu (computed from the state text's directional words, so the test also exercises the wording round trip).
+`_fake_rig.py`: a minimal `Embodiment` with the 14-dim YAM-like absolute Cartesian action box (labels as in Task 7), `eef_state` observation, a `top_cam` image (zeros, 64×64×3), `top_cam_intrinsics`, a kinematic toy world where a "cube" and "bowl" have fixed positions, the gripper closes to 0.3 when within 1.5 cm of the cube, the cube follows the gripper while closed, `step()` always returns `terminated=False` so the trial can only end through the policy's `request_stop`, and a `FakeDetector` that reports tags at the true object positions (so the perceiver sees a consistent world). A scripted `FakeClient` that always picks the greedy-best option from the menu (computed from the state text's directional words, so the test also exercises the wording round trip).
 
-- [ ] **Step 1:** write the test: `task = Task(name="jev-cube-in-bowl", scenes=ListSceneDataset([Scene(id="s0", instruction="put the cube in the bowl")]), scorer=[cube_in_bowl()], max_steps=150)`; `logs = eval(task, JevPolicy(config, client=fake, perceiver=Perceiver(...)), FakeRig(), log_dir=str(tmp_path))`; assert the log status is `"success"`, the trial ended by `request_stop` (`truncated` with `termination_reason` naming the policy stop), the `jev_cube_in_bowl` score is True, the policy transcript is present and non-empty, and every recorded action stayed within the box bounds. (`eval()` has no scorer argument; scorers live on the `Task`.)
+- [ ] **Step 1:** write the test: `task = Task(name="jev-cube-in-bowl", scenes=[Scene(id="s0", instruction="put the cube in the bowl")], scorer=[cube_in_bowl()], max_steps=600)` (a plain list: `Task.scenes` is `Sequence[Scene]` and `ListSceneDataset` is not a `Sequence` under mypy strict; 600 ticks because a nominal run is ~150 ticks); `logs = eval(task, JevPolicy(config, client=fake, perceiver=Perceiver(...)), FakeRig(), log_dir=str(tmp_path))`; assert the log status is `"success"`, the trial ended by `request_stop` (`truncated` with `termination_reason` naming the policy stop), the `jev_cube_in_bowl` score is True, the policy transcript is present and non-empty, and every recorded action stayed within the box bounds. (`eval()` has no scorer argument; scorers live on the `Task`.)
 - [ ] **Step 2–4:** run (expect failure until the fakes are right), fix, run the plugin's full suite with `--cov-fail-under=100`.
 - [ ] **Step 5: Commit** — `test(jev): end-to-end eval on a fake Cartesian rig`.
 
@@ -1565,6 +1581,7 @@ capture_width = 1920                  # NEW in inspect-robots-yam (companion PR)
 capture_height = 1080
 cam_width = 1920                      # no downscale: tags need every pixel
 cam_height = 1080
+gripper_max_step = 0.25               # a full close/open in 4 ticks instead of 20
 ```
 
 **Companion change (separate PR on `robocurve/inspect-robots-yam`):** add
@@ -1578,8 +1595,8 @@ and the command:
 
 ```bash
 inspect-robots "put the cube in the bowl" --policy jev \
-  -P tags=~/jev/tags.json -P calibration=~/jev/calibration.json --embodiment yam \
-  --scorer jev_cube_in_bowl --max-steps 120
+  -P tags=$HOME/jev/tags.json -P calibration=$HOME/jev/calibration.json --embodiment yam \
+  --scorer jev_cube_in_bowl --max-steps 600
 ```
 
 `YamConfig` accepts non-square `cam_width`/`cam_height` today (no square check in `config.py`), so nothing to verify there.
@@ -1593,5 +1610,7 @@ inspect-robots "put the cube in the bowl" --policy jev \
 **Placeholder scan:** none of TBD/TODO/"handle edge cases". Tasks 5–9 give algorithms and exact interfaces with prose steps rather than full listings; the interfaces are complete and the tests are specified concretely.
 
 **Critique round 1 (fresh-context subagent, 2026-09-19):** 6 major, 6 minor, 2 nits, all folded into this revision: scorer reads the last step's `Action.meta` because `eval()` scores before `on_trial_end`; `Task(scorer=...)` replaces the non-existent `eval(scorer=)`; tag-frame z points into the tag so face offsets are `+half`; YAM captures at a fixed 640 × 480 so a companion `capture_width/height` change is required (Task 14); positional goals are clamped into workspace bounds so the 0.03 m `z` floor cannot deadlock `descend`/`lower`; `ci-ok` needs, `uv.lock`, and the `pypi-jev` environment are called out; uint8 grayscale and single detector construction; `request_stop` on `Action.meta`; arm choice by base distance; motion test without `max_step`; serializer key renamed to `target_point_…` and thresholds sourced from `TaskConfig`; calibrate CLI reads `.npy`; `build_menu` signature and scorer name aligned.
+
+**Critique round 2 (fresh-context subagent, 2026-09-19):** all round-1 fixes verified present in plan and code; 2 major, 6 minor, 3 nits, all folded in: `max_steps` counts control ticks, not decisions (§0, §6, Task 12 → 600, Task 14 → 600 + `gripper_max_step`); a `reopen` phase after closing on air (Task 5, §3.1a, serializer); `Task(scenes=[...])` not `ListSceneDataset`; scorer requires the cube to be re-seen after release (`held`/`seen_ago` in `meta["jev"]`); chunks interpolate from the last commanded target; `closed_on_air` in `TaskConfig`; `held` window and top-down occlusion note spelled out; `jev_policy` coercion rules; `pose_t.reshape(3)`; `$HOME` in the recipe; `FakeRig` never terminates.
 
 **Type consistency:** `Move(arm, axis, delta_m, gripper)` used identically in T4/T7/T10; `WorldState.offset/steps_since_seen` in T5/T6/T10; `Phase(name, arm, target, menu_kind, goal)` in T5/T6/T10; `ChoiceAnswer` fields in T3/T10; `Calibration.to_arm` in T8/T9; `GripperView(position, opening)` in T2/T5/T9/T10.

@@ -105,13 +105,17 @@ def test_full_happy_path() -> None:
     assert m.phase.name == "done"
 
 
-def test_grasp_on_air_returns_to_approach() -> None:
+def test_grasp_on_air_reopens_then_returns_to_approach() -> None:
     m = PhaseMachine(TaskConfig())
     m.reset(world())
     m.advance(world(left=(0.30, 0.10, 0.063)))
     m.advance(world(left=(0.30, 0.10, 0.013)))
     assert m.phase.name == "grasp"
-    assert m.advance(world(left=(0.30, 0.10, 0.013), opening=0.01)).name == "approach"
+    p = m.advance(world(left=(0.30, 0.10, 0.013), opening=0.01))
+    assert (p.name, p.menu_kind, p.target, p.goal) == ("reopen", "grip_open", "cube", None)
+    # still closed: stay in reopen, never bounce back to grasp
+    assert m.advance(world(left=(0.30, 0.10, 0.013), opening=0.01)).name == "reopen"
+    assert m.advance(world(left=(0.30, 0.10, 0.013), opening=0.9)).name == "approach"
 
 
 def test_grasp_waits_while_still_open() -> None:

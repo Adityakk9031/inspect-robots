@@ -15,13 +15,23 @@ from inspect_robots_jev.menu import MenuKind
 from inspect_robots_jev.world import ARMS, Arm, Vec3, WorldState
 
 PhaseName = Literal[
-    "approach", "descend", "grasp", "lift", "carry", "lower", "release", "retreat", "done"
+    "approach",
+    "descend",
+    "grasp",
+    "reopen",
+    "lift",
+    "carry",
+    "lower",
+    "release",
+    "retreat",
+    "done",
 ]
 #: Which arm/target/menu each phase uses. Target is the object the menu talks about.
 _TARGET: dict[PhaseName, str] = {
     "approach": "cube",
     "descend": "cube",
     "grasp": "cube",
+    "reopen": "cube",
     "lift": "cube",
     "carry": "bowl",
     "lower": "bowl",
@@ -33,6 +43,7 @@ _MENU: dict[PhaseName, MenuKind] = {
     "approach": "xyz",
     "descend": "z",
     "grasp": "grip_close",
+    "reopen": "grip_open",
     "lift": "z",
     "carry": "xyz",
     "lower": "z",
@@ -135,10 +146,12 @@ class PhaseMachine:
             self._name = "grasp"
         elif self._name == "grasp":
             if grip.opening <= cfg.closed_on_air:
-                self._name = "approach"
+                self._name = "reopen"  # closed on nothing: open again before retrying
             elif grip.opening <= cfg.closed_on_object:
                 self._grasp_point = grip.position
                 self._name = "lift"
+        elif self._name == "reopen" and grip.opening >= cfg.open_threshold:
+            self._name = "approach"
         elif (
             self._name == "lift" and goal is not None and grip.position[2] >= goal[2] - cfg.z_tol_m
         ):
