@@ -119,8 +119,8 @@ def test_cube_into_bowl_end_to_end(tmp_path: Path, occlude: bool, floor_z: float
     assert rig.holding is False
     assert np.hypot(*(rig.cube[:2] - rig.bowl[:2])) <= 0.04
     # the trial must not have ended while the cube was still hidden under the gripper
-    last = transcript[-1]
-    assert last["phase"] == "done"
+    final_cube = sample.trial_metadata[0]["jev"]["final_world"]["cube"]
+    assert final_cube["from_gripper"] is False and final_cube["seen_ago"] == 0
     low, high = np.asarray(BOX.low), np.asarray(BOX.high)
     for cmd in rig.commanded:
         assert np.all(cmd >= low - 1e-12) and np.all(cmd <= high + 1e-12)

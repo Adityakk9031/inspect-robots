@@ -375,3 +375,30 @@ def test_steps_cm_must_be_positive() -> None:
         jev_policy(steps_cm="0,2")
     with pytest.raises(ValueError, match="positive"):
         jev_policy(steps_cm="")
+
+
+def test_resync_keeps_the_gripper_commanded_closed() -> None:
+    perc = FakePerceiver()
+    policy, _, _ = make(["left_z_minus_2cm", "left_close", "left_z_plus_2cm"], perc)
+    policy.act(obs())
+    assert policy._machine is not None
+    policy._machine._name = "grasp"
+    closing = policy.act(obs(left=(0.20, 0.0, 0.18), step=1))
+    assert closing.actions[-1].data[6] == 0.0
+    # the jaws stopped on the cube at 0.3 (5 cm off in x too: position resyncs)
+    policy._machine._name = "lift"
+    lift = policy.act(obs(left=(0.25, 0.0, 0.18), opening=0.3, step=2))
+    assert lift.actions[0].data[0] == pytest.approx(0.25)  # position restarted from measured
+    assert all(a.data[6] == 0.0 for a in lift.actions)  # grip stays commanded closed
+
+
+def test_stall_in_approach_rises() -> None:
+    perc = FakePerceiver(objects={"bowl": BOWL})
+    policy, _, _ = make([], perc)
+    perc.objects["cube"] = CUBE
+    perc.seen_step["cube"] = -20  # remembered long ago
+    perc.visible = False
+    policy.act(obs())  # reset happens (cube in memory) then the target is stale
+    chunk = policy.act(obs(step=1))
+    assert chunk.actions[-1].meta["jev"]["stall"] == "cube tag not seen"
+    assert chunk.actions[-1].data[2] == pytest.approx(0.20 + 0.05)

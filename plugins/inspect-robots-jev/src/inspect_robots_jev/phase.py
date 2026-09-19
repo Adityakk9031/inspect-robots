@@ -147,15 +147,20 @@ class PhaseMachine:
         self._phase = self._build(world)
         return self._phase
 
-    def advance(self, world: WorldState) -> Phase:
-        """Apply at most one transition for this world snapshot and return the phase."""
+    def advance(self, world: WorldState, *, descended: bool = True) -> Phase:
+        """Apply at most one transition for this world snapshot and return the phase.
+
+        ``descended`` says whether the previous decision actually commanded a
+        downward move; the contact rule only counts those, so holds or small
+        sideways picks never masquerade as "resting on something".
+        """
         cfg = self._cfg
         arm = self._arm
         grip = world.grippers[arm]
         current = self._build(world)
         goal = current.goal
         before = self._name
-        blocked = self._track_contact(grip.position[2])
+        blocked = self._track_contact(grip.position[2], descended)
         if self._name == "approach" and goal is not None and self._near(grip.position, goal):
             self._name = "descend"
         elif (
@@ -207,17 +212,23 @@ class PhaseMachine:
         self._phase = self._build(world)
         return self._phase
 
-    def _track_contact(self, z: float) -> bool:
-        """Record the gripper height; True when it has stopped descending (contact)."""
+    def _track_contact(self, z: float, descended: bool) -> bool:
+        """Record the gripper height after each commanded descent; True on contact.
+
+        Contact means the last ``contact_decisions + 1`` recorded heights span
+        no more than ``z_tol_m`` although every one followed a DOWN command.
+        """
         if self._name not in ("descend", "lower"):
             self._z_trace = []
+            return False
+        if not descended:
             return False
         self._z_trace.append(z)
         n = self._cfg.contact_decisions + 1
         if len(self._z_trace) < n:
             return False
         window = self._z_trace[-n:]
-        return (window[0] - min(window)) <= self._cfg.z_tol_m
+        return (max(window) - min(window)) <= self._cfg.z_tol_m
 
     # -- helpers -----------------------------------------------------------
 

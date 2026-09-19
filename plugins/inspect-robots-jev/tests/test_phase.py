@@ -208,3 +208,17 @@ def test_z_trace_resets_outside_descending_phases() -> None:
     for _ in range(5):
         m.advance(world(left=(0.10, 0.10, 0.30)))
     assert m._z_trace == []
+
+
+def test_contact_rule_ignores_rising_and_uncommanded_decisions() -> None:
+    m = PhaseMachine(TaskConfig(contact_decisions=3))
+    m.reset(world())
+    m._name = "descend"
+    # rising for four decisions is not contact
+    for z in (0.10, 0.11, 0.12, 0.13):
+        assert m.advance(world(left=(0.30, 0.10, z))).name == "descend"
+    m._z_trace = []
+    # flat height but no DOWN was commanded (holds): not contact either
+    for _ in range(5):
+        assert m.advance(world(left=(0.30, 0.10, 0.08)), descended=False).name == "descend"
+    assert m._z_trace == []

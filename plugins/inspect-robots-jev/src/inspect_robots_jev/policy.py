@@ -30,7 +30,7 @@ from inspect_robots_jev.motion import MotionMapper
 from inspect_robots_jev.perceiver import Perceiver, TagLayout
 from inspect_robots_jev.phase import Phase, PhaseMachine, TaskConfig
 from inspect_robots_jev.serializer import build_state, instructions_for
-from inspect_robots_jev.world import ARMS, Arm, GripperView, Vec3, WorldState
+from inspect_robots_jev.world import ARMS, AXES, Arm, GripperView, Vec3, WorldState
 
 #: Phases during which the cube is in the gripper and its tags are expected to be hidden.
 _HELD_PHASES = frozenset({"lift", "carry", "lower"})
@@ -79,6 +79,7 @@ class JevPolicy(PolicyBase):
         self._stalls = 0
         self._last_world: WorldState | None = None
         self._last_target: np.ndarray | None = None
+        self._last_move: Move | None = None
         self.info = PolicyInfo(name="jev", action_space=Box(shape=(14,)))
 
     # -- lifecycle -----------------------------------------------------------
@@ -108,6 +109,7 @@ class JevPolicy(PolicyBase):
         self._stalls = 0
         self._last_world = None
         self._last_target = None
+        self._last_move = None
         if self._perceiver is not None:
             self._perceiver.reset()
 
@@ -149,13 +151,16 @@ class JevPolicy(PolicyBase):
         # tracking lag never shows up as a spurious delta clamp on the first tick
         # and a hold repeats the command instead of walking the arm back.
         start = self._last_target if self._last_target is not None else eef
-        if self._last_target is not None and bool(
-            np.any(np.abs(self._last_target - eef) > _RESYNC_M)
-        ):
-            # the arm could not follow (contact, IK hold): stop commanding from a
-            # phantom pose and restart from where the arm really is
-            start = eef
-            self._last_target = None
+        if self._last_target is not None and self._machine is not None:
+            arm = self._machine.phase.arm
+            xyz = [mapper.index(f"{arm}_{axis}") for axis in AXES]
+            if bool(np.any(np.abs(self._last_target[xyz] - eef[xyz]) > _RESYNC_M)):
+                # The arm could not follow (contact, IK hold): restart the position
+                # interpolation from where the arm really is. Gripper and
+                # orientation keep their commanded values: a jaw that stopped on
+                # the cube at 0.3 must stay commanded closed, or the grasp relaxes.
+                start = self._last_target.copy()
+                start[xyz] = eef[xyz]
         if self._machine is None:
             if cfg.task.cube not in world.objects or cfg.task.bowl not in world.objects:
                 return self._stall(
@@ -164,7 +169,12 @@ class JevPolicy(PolicyBase):
             self._machine = PhaseMachine(cfg.task, bounds=self._bounds)
             phase = self._machine.reset(world)
         else:
-            phase = self._machine.advance(world)
+            descended = (
+                self._last_move is not None
+                and self._last_move.axis == "z"
+                and self._last_move.delta_m < 0
+            )
+            phase = self._machine.advance(world, descended=descended)
         self._held = (phase.arm, cfg.task.cube) if phase.name in _HELD_PHASES else None
         if phase.name == "done":
             return self._finish(mapper, start, world, phase, held_for_world, tick)
@@ -197,6 +207,7 @@ class JevPolicy(PolicyBase):
             move = Move(phase.arm, None, 0.0, None)
         chunk = mapper.chunk(move, start)
         self._last_target = np.asarray(chunk.actions[-1].data, dtype=np.float64)
+        self._last_move = move
         self._decisions += 1
         self._history.append(menu[answer.choice].split(";")[0])
         summary = self._summary(
@@ -319,6 +330,7 @@ class JevPolicy(PolicyBase):
             rise = Move(phase.arm, "z", self.settings.task.hover_m, None)
             chunk = mapper.chunk(rise, eef)
             self._last_target = np.asarray(chunk.actions[-1].data, dtype=np.float64)
+            self._last_move = rise
             return self._with_meta(chunk, meta)
         return self._hold(mapper, eef, meta)
 
