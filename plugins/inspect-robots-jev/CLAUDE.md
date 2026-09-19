@@ -18,7 +18,8 @@ the YAM arms from AprilTag world state. Spec and task list:
 | `calibration.py` | camera→arm transforms from a touched table tag; JSON load/save |
 | `perceiver.py` | AprilTag detections → `WorldState` (bundle fusion, depth refinement, occlusion memory) |
 | `policy.py` | `JevPolicy`, `jev_policy` registry entry |
-| `scorer.py` | `cube_in_bowl` pose-based scorer |
+| `scorer.py` | `cube_in_bowl` pose-based scorer (reads the last action's `meta["jev"]`, requires the cube re-seen after release) |
+| `calibrate.py` | `python -m inspect_robots_jev.calibrate`: corners JSON + `.npy` frame/intrinsics → `calibration.json` |
 
 ## Invariants
 
@@ -28,6 +29,12 @@ the YAM arms from AprilTag world state. Spec and task list:
 - Code curates what Jev sees: only the current target's geometry, other
   objects by name. Code owns phases and completion; Jev only picks a move.
 - One Choice question per request. Confidence is logged, never gated.
+- `JevPolicy.settings` holds the plugin config; `PolicyBase.config` is the
+  core `PolicyConfig` and must not be shadowed.
+- Chunks interpolate from the last *commanded* target, not the measured pose,
+  so IK lag never shows as a spurious delta clamp.
+- `max_steps` counts control ticks (one pick = 1–4 ticks); a nominal
+  cube-into-bowl run is ~150 ticks, budgets use 600.
 - Every I/O edge (HTTP, tag detector) is injectable; the whole policy runs in
   tests with no network, camera, or robot.
 - Gates: ruff, ruff format, mypy strict (src + tests), pytest 100 % coverage.

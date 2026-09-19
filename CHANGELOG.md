@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `plugins/inspect-robots-jev/`: TypeSafe's **Jev** structured-decision model
+  as the policy `jev` (plan 0076). Jev is text-only and picks one option from
+  a menu, so the plugin reads AprilTag poses from the top camera, writes a
+  curated world state in directional words, asks one Choice question per step
+  over the OpenRouter Decisions API (or TypeSafe direct), and maps the pick to
+  a bounded Cartesian move on the YAM `eef_pos` interface. Ships a code-owned
+  cube-into-bowl phase machine, the pose-based scorer `jev_cube_in_bowl`, a
+  `python -m inspect_robots_jev.calibrate` camera-to-arm tool, and
+  `examples/jev_textsim.py`, a live wording-regression probe.
+
 ### Fixed
 
 - **Core:** the shared chat wire behind task generation, the `vlm` grader,
