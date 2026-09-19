@@ -276,12 +276,22 @@ are configurable.
   rigid, so calibrating once per run is fine. Today the rig opens it through
   the plain webcam path, which gives no lens intrinsics and no depth, and
   the policy receives 224 × 224 pixel images. Both are showstoppers for tag
-  reading: a 20 mm tag would be about 4 pixels wide. Version 1 therefore
-  requires two rig config changes for Jev runs: hand the `top` slot to the
-  RealSense library (`top_depth_serial = <serial>`), which serves intrinsics
-  and depth, and raise the frame size (`cam_width = 1280`, `cam_height =
-  720`). The wrist cameras above each gripper move with the arms and are
-  not used in version 1.
+  reading: a 20 mm tag would be about 4 pixels wide. Worse, *both* YAM camera
+  paths capture at a fixed 640 × 480 and then resize to `cam_width ×
+  cam_height` (`_capture_proc.py` `REALSENSE_CAPTURE_WIDTH/HEIGHT`; the
+  OpenCV path sets 640 too), so a larger frame size only upsamples. From the
+  measured 1.2 m camera height a 20 mm tag is about 10 px wide at 640, which
+  no detector reads. Version 1 therefore needs a small **companion change in
+  `inspect-robots-yam`** (its own PR): make the capture resolution
+  configurable (`capture_width`, `capture_height`, defaults unchanged at
+  640 × 480) on both paths, with intrinsics scaled from the capture size.
+  Jev runs then set `top_depth_serial = <serial>` (RealSense path:
+  intrinsics + depth), `capture_width = 1920`, `capture_height = 1080`,
+  `cam_width = 1920`, `cam_height = 1080`. Non-square sizes are accepted
+  today (`YamConfig` has no square check). Fallbacks if 1080p capture is too
+  slow: 1280 × 720 with the camera lowered to about 0.8 m, or larger objects.
+  The wrist cameras above each gripper move with the arms and are not used
+  in version 1.
 - **Tag family** 36h11, the default every detector supports. A 36h11 tag is
   a black square of 8 × 8 cells and needs a white margin of at least one
   cell all round, so its full footprint is 10 × 10 cells.
@@ -302,12 +312,19 @@ are configurable.
   flaky, the fallbacks are: 1920 × 1080 frames, mounting the camera lower,
   or using the wrist cameras during approach (version 2).
 - **Several tags per object** are merged as one rigid body from a config
-  file mapping tag ID → object name, black-square size, and face, so the
-  cube stays visible when the gripper hides its top face.
+  file mapping tag ID → object name, black-square size, and the object
+  centre's offset in the *tag's* frame, so the cube stays visible when the
+  gripper hides its top face. Tag frame convention (AprilTag 3, as returned
+  by `pupil-apriltags`): x to the tag's right, y down, **z into the tag, away
+  from the camera**. A face tag on a 25.4 mm cube has the cube centre at
+  `(0, 0, +0.0127)`.
 - **Calibration** (finding where the camera is relative to each arm base).
   The table tag stays fixed. Instead of measuring its position by hand, we
   touch its four corners with the gripper tip and read the grasp-point
-  position the embodiment reports, once per arm. That gives the tag's pose
+  position the embodiment reports, once per arm, in a fixed order: the
+  *printed tag's* top-left, top-right, bottom-right, bottom-left (mark the
+  printed top-left corner with a pen; the order follows the tag's own
+  orientation, not the camera image). That gives the tag's pose
   in each arm's frame to a few millimetres. At the start of each run the
   code sees the tag, solves the camera pose, and caches it. The `doctor`
   command gains a check that the table tag is visible.
@@ -320,7 +337,10 @@ are configurable.
 
 Guardrails unchanged. On top of that: the largest menu step (5 cm) bounds
 any single decision; the phase machine only allows a grasp when the gripper
-is within tolerance; and `max_steps` on the task stops a trial that stalls.
+is within tolerance; every positional goal is clamped into the arm's
+configured workspace bounds before the tolerance test, so a goal below the
+`z` floor (default 0.03 m) cannot deadlock a phase; and `max_steps` on the
+task stops a trial that stalls.
 In the test, a successful approach took about 11 to 12 decisions.
 
 ## 7. Settings
@@ -394,7 +414,22 @@ needs images and intrinsics).
 - Direction words are fixed: `+x FORWARD`, `-x BACK`, `+y LEFT`, `-y RIGHT`, `+z UP`, `-z DOWN`, in the active arm's base frame (YAM `eef_pos` convention). Distances in the state are rounded to 0.5 cm.
 - Jev request: exactly one Choice question per step, id `move`. No Score, no Noul.
 - Backends: `openrouter` (default; `POST https://openrouter.ai/api/alpha/decisions`, `OPENROUTER_API_KEY`, model `typesafe/jev-1.13`) and `typesafe` (`POST https://api.typesafe.ai/v1/systemone`, `TYPESAFE_API_KEY`, model `jev-latest`).
-- Package layout, naming, CI wiring, and README/PyPI-readme boilerplate mirror `plugins/inspect-robots-capx/`.
+- Package layout, naming, CI wiring, and README/PyPI-readme boilerplate mirror
+  `plugins/inspect-robots-capx/`. The new job is added to **both** `ci-ok`
+  `needs` lists (root CLAUDE.md: a job not in `ci-ok` does not gate merges);
+  `uv.lock` is regenerated and committed with the scaffold (CI uses
+  `uv sync --locked`). The `pypi-jev` GitHub environment and PyPI trusted
+  publisher must be created by a maintainer before the release job can
+  succeed — a human-only step, listed in the PR.
+- Scoring order: `eval()` runs scorers **before** `policy.on_trial_end`
+  (`eval.py` ~565–585), so anything a scorer needs must ride on
+  `Action.meta` of the recorded steps, never on `record.metadata`.
+- `request_stop` is read from `Action.meta` per action (`rollout.py` ~410),
+  not from `ActionChunk.meta`. A stopped trial ends `truncated=True` with
+  `status == "success"` and is scored.
+- Scorers belong to `Task(scorer=[...])`; `eval()` has no scorer argument.
+- Real `pupil_apriltags.Detector.detect` requires a contiguous 2-D `uint8`
+  array.
 
 ## File structure
 
@@ -404,14 +439,14 @@ needs images and intrinsics).
 | `src/inspect_robots_jev/__init__.py` | public re-exports, `__version__` |
 | `src/inspect_robots_jev/world.py` | `Vec3`, `ObjectView`, `GripperView`, `WorldState`, direction vocabulary, `describe_offset` |
 | `src/inspect_robots_jev/_decisions.py` | `DecisionsClient`, `ChoiceAnswer`, `DecisionsError`; injectable `http_post` |
-| `src/inspect_robots_jev/menu.py` | `Move`, `build_menu(phase, steps_cm)`, `parse_option(option_id)` |
+| `src/inspect_robots_jev/menu.py` | `Move`, `build_menu(arm, kind, target_name, steps_cm)`, `parse_option(option_id)` |
 | `src/inspect_robots_jev/phase.py` | `Phase`, `TaskConfig`, `PhaseMachine` (cube-into-bowl transitions) |
 | `src/inspect_robots_jev/serializer.py` | `build_state(world, phase, history)` → JSON-able dict |
 | `src/inspect_robots_jev/motion.py` | `MotionMapper`: `Move` + current `eef_state` → `ActionChunk` on an absolute Cartesian `Box` |
 | `src/inspect_robots_jev/calibration.py` | `Calibration` (camera→arm transforms), `solve_camera_pose`, JSON load/save |
 | `src/inspect_robots_jev/perceiver.py` | `TagSpec`, `TagLayout`, `Perceiver.update(observation, step)` → `WorldState` |
 | `src/inspect_robots_jev/policy.py` | `JevPolicy(PolicyBase)`, `jev_policy(**kwargs)` registry entry |
-| `src/inspect_robots_jev/scorer.py` | `cube_in_bowl(...)` scorer reading `record.metadata["jev"]` |
+| `src/inspect_robots_jev/scorer.py` | `cube_in_bowl(...)` scorer reading the last step's `action.meta["jev"]["world"]` |
 | `tests/` | one test module per source module + `test_end_to_end.py` |
 | `examples/jev_textsim.py` (repo root `examples/`) | live wording-regression probe (spike v3b cleaned up), not in CI |
 | `README.md`, `CLAUDE.md`, root `CHANGELOG.md`, `.github/workflows/ci.yml`, `release.yml` | docs and CI wiring |
@@ -509,17 +544,17 @@ __version__ = version("inspect-robots-jev")
 
 - [ ] **Step 5: Install into the workspace and run the test**
 
-Run: `uv sync --all-packages --extra dev && uv run --no-sync python -m pytest plugins/inspect-robots-jev/tests/test_package.py -q`
-Expected: PASS (entry points resolve from metadata even though targets do not exist yet).
+Run: `uv lock && uv sync --all-packages --extra dev && uv run --no-sync python -m pytest plugins/inspect-robots-jev/tests/test_package.py -q`
+Expected: PASS (entry points resolve from metadata even though targets do not exist yet). `uv.lock` changes and is committed in Step 7.
 
 - [ ] **Step 6: CI wiring**
 
-In `.github/workflows/ci.yml` duplicate the capx plugin job with every `capx` → `jev`, `inspect_robots_capx` → `inspect_robots_jev`; set `--cov-fail-under=100`. In `release.yml` duplicate the capx publish job for `inspect-robots-jev`. Run `uv run --no-sync ruff check plugins/inspect-robots-jev && uv run --no-sync ruff format --check plugins/inspect-robots-jev`; expected clean.
+In `.github/workflows/ci.yml` duplicate the capx plugin job with every `capx` → `jev`, `inspect_robots_capx` → `inspect_robots_jev`; set `--cov-fail-under=100`; add `plugin-jev` to both `ci-ok` `needs` lists (~lines 443 and 456). In `release.yml` duplicate the capx publish job for `inspect-robots-jev`. Run `uv run --no-sync ruff check plugins/inspect-robots-jev && uv run --no-sync ruff format --check plugins/inspect-robots-jev`; expected clean.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add plugins/inspect-robots-jev .github/workflows/ci.yml .github/workflows/release.yml
+git add plugins/inspect-robots-jev .github/workflows/ci.yml .github/workflows/release.yml uv.lock
 git commit -m "feat(jev): scaffold inspect-robots-jev plugin package and CI"
 ```
 
@@ -1002,7 +1037,7 @@ class DecisionsClient:
 - Create: `src/inspect_robots_jev/menu.py`, `tests/test_menu.py`
 
 **Interfaces:**
-- Consumes: `Arm`, `AXES`, `DIRECTION` from `world.py`; `Phase` from Task 5 (only the fields `arm`, `menu_kind`, `target`).
+- Consumes: `Arm`, `AXES`, `DIRECTION` from `world.py` only (no `phase.py` import, so `phase.py` can import `MenuKind` without a cycle).
 - Produces:
 
 ```python
@@ -1200,20 +1235,29 @@ class Phase:
     goal: Vec3 | None               # where the gripper should be (arm frame) for this phase, if positional
 
 class PhaseMachine:
-    def __init__(self, config: TaskConfig) -> None
+    def __init__(self, config: TaskConfig, *, bounds: tuple[Vec3, Vec3] | None = None) -> None
+        # bounds = (low_xyz, high_xyz) of the arm workspace; every positional goal is
+        # clamped into them before the tolerance test (YAM default z floor is 0.03 m,
+        # below a cube centre on the table). None = no clamping (tests).
     @property
     def phase(self) -> Phase
-    def reset(self, world: WorldState) -> Phase      # picks the arm closer to the cube
-    def advance(self, world: WorldState) -> Phase    # apply transition rules, return current
+    def reset(self, world: WorldState) -> Phase      # picks the arm whose BASE is nearer the cube:
+                                                     #   min(ARMS, key=lambda a: norm(cube.in_frame[a]))
+    def advance(self, world: WorldState) -> Phase    # apply at most one transition, return current
 ```
 
+The machine stores `_grasp_point` (the gripper position at the `grasp → lift`
+transition) because the `lift` goal is relative to where the grasp happened;
+every other goal is recomputed from the current world each call, then
+clamped into `bounds`.
+
 Transition rules (evaluated in order, one transition per call):
-- `approach`: goal = cube + (0,0,hover). → `descend` when xy within `xy_tol` and z within `z_tol` of goal.
-- `descend`: goal = cube centre (grasp point at cube centre height). menu `z`. → `grasp` when z within `z_tol`.
+- `approach`: goal = clamp(cube + (0,0,hover)). → `descend` when xy within `xy_tol` and z within `z_tol` of goal.
+- `descend`: goal = clamp(cube centre). menu `z`. → `grasp` when z within `z_tol`. (On the rig the clamp raises this to the `z` floor when the cube centre is below it; set `eef_low` z per rig so the fingertips can reach the cube.)
 - `grasp`: menu `grip_close`. → `lift` when gripper opening ≤ `closed_on_object` and > 0.02 (closed on something, not on nothing). If opening ≤ 0.02 (closed on air) → back to `approach`.
 - `lift`: goal = grasp position + (0,0,lift). menu `z`. → `carry` when z ≥ goal z − z_tol.
 - `carry`: goal = bowl + (0,0,hover + cube_half). menu `xyz`. → `lower` when xy within `xy_tol`.
-- `lower`: goal = bowl − (0,0,bowl_depth) + cube_half. menu `z`. → `release` when z within z_tol.
+- `lower`: goal = clamp(bowl − (0,0,bowl_depth) + cube_half). menu `z`. → `release` when z within z_tol.
 - `release`: menu `grip_open`. → `retreat` when opening ≥ `open_threshold`.
 - `retreat`: goal = bowl + (0,0,lift). menu `z`. → `done` when z ≥ goal z − z_tol.
 - `done`: stays.
@@ -1273,7 +1317,7 @@ def test_no_transition_when_far() -> None:
 
 - [ ] **Step 2: Run; expect ImportError.**
 - [ ] **Step 3: Implement** (dataclasses as in Interfaces; `advance` is a chain of `if self._phase.name == ...` checks each computing the goal from the current world and testing tolerances with `abs(dx) <= tol` per axis; `_goal()` helper recomputes `goal` for the current phase so `Phase.goal` always reflects the latest world). Keep the file under 150 lines; no I/O.
-- [ ] **Step 4: Run tests, ruff, mypy; expect 100 % of `phase.py` covered (add a `right`-arm reset test with the cube nearer the right gripper).**
+- [ ] **Step 4: Run tests, ruff, mypy; expect 100 % of `phase.py` covered. Add: a `right`-arm reset test with the cube nearer the right arm's base; a bounds test where the `descend` goal is below `low` z and the transition fires at the floor; `pytest.approx` on every goal assertion.**
 - [ ] **Step 5: Commit** — `feat(jev): cube-into-bowl phase machine`.
 
 ---
@@ -1292,9 +1336,9 @@ def build_state(world: WorldState, phase: Phase, history: Sequence[str], *, hist
 def instructions_for(phase: Phase) -> str
 ```
 
-`build_state` output keys, in this order: `task` (one sentence per phase, see table), `<target>_relative_to_<arm>_gripper` (list from `describe_offset(goal, gripper)` — note the *goal* for positional phases, so "hover 5 cm above the cube" is what Jev steers to; for gripper phases the key is omitted), `straight_line_distance_cm` (rounded to 0.1), `<arm>_gripper` (`"open"`/`"closed"`/`"partly closed"` from opening ≥0.8 / ≤0.35 / else), `other_objects_on_table_ignore_them` (sorted names except the target), `recent_moves_oldest_first` (last `history_len` entries of `history`, which the policy fills with menu *descriptions* truncated before `;`), and `note` only when `world.steps_since_seen(target) > 0`: `"the <target> was last seen <n> moves ago; assume it has not moved"`.
+`build_state(world, phase, history, *, history_len=5, open_threshold=0.8, closed_threshold=0.35)` output keys, in this order: `task` (one sentence per phase, see table; it names the target point), `target_point_relative_to_<arm>_gripper` (list from `describe_offset(goal, gripper)` — the *goal* point, e.g. 5 cm above the cube, is what Jev steers to, so the key says "target point", not the object's name; for gripper phases this key **and** `straight_line_distance_cm` are omitted), `straight_line_distance_cm` (rounded to 0.1), `<arm>_gripper` (`"open"`/`"closed"`/`"partly closed"` from opening ≥ `open_threshold` / ≤ `closed_threshold` / else; the policy passes `TaskConfig.open_threshold` and `closed_on_object` so the two never drift), `other_objects_on_table_ignore_them` (sorted names except the target), `recent_moves_oldest_first` (last `history_len` entries of `history`, which the policy fills with menu *descriptions* truncated before `;`), and `note` only when `world.steps_since_seen(target) > 0`: `"the <target> was last seen <n> moves ago; assume it has not moved"`.
 
-Task sentences: approach → `Move the {arm} gripper to hover 5 cm above the {target}. Move toward that point, never away.`; descend → `Lower the {arm} gripper straight down onto the {target}.`; grasp → `Close the {arm} gripper on the {target}.`; lift → `Raise the {arm} gripper straight up, carrying the {target}.`; carry → `Move the {arm} gripper to hover above the {target}, carrying the cube. Move toward that point, never away.`; lower → `Lower the {arm} gripper into the {target}.`; release → `Open the {arm} gripper to drop the cube into the {target}.`; retreat → `Raise the {arm} gripper straight up, away from the {target}.`; done → `The task is complete.`
+Task sentences: approach → `Move the {arm} gripper to the target point 5 cm above the {target}. Move toward that point, never away.`; descend → `Lower the {arm} gripper straight down onto the {target}.`; grasp → `Close the {arm} gripper on the {target}.`; lift → `Raise the {arm} gripper straight up, carrying the {target}.`; carry → `Move the {arm} gripper to the target point above the {target}, carrying the cube. Move toward that point, never away.`; lower → `Lower the {arm} gripper into the {target}.`; release → `Open the {arm} gripper to drop the cube into the {target}.`; retreat → `Raise the {arm} gripper straight up, away from the {target}.`; done → `The task is complete.`
 
 `instructions_for` (the Choice `instructions` field): positional phases → `Which move takes the {arm} gripper toward the target point? Move in the direction the target is in, along the axis with the largest remaining gap, with a step no larger than that gap.`; grip phases → `Should the {arm} gripper act now?`; done → `Pick hold.`
 
@@ -1327,7 +1371,7 @@ class MotionMapper:
         # gripper -> target[gripper idx] = value; split by gripper step limit the same way
 ```
 
-Step limit per index: `semantics.max_step[i]` when declared, else 5 % of `(high - low)[i]`. If `n` exceeds `ceil(max_playout_s * (control_hz or 10))`, raise `ValueError` (the menu's 5 cm cap makes this unreachable in practice; it is a guard).
+Step limit per index: `semantics.max_step[i]` when declared, else 5 % of `(high - low)[i]` — the same default `DeltaLimitApprover` derives, so the mapper never emits a step the approver would clamp. On the real YAM `eef_pos` box `max_step` is `None` unless `gripper_max_step` is set, so the 5 % fallback is the branch that runs on the rig; the tests must cover a Box **without** `max_step` (x range 0.33 m → 1.65 cm/tick → a 5 cm move splits into 4 actions; gripper 0–1 → 0.05/tick → 20 actions for a full close) as well as one with it. If `n` exceeds `ceil(max_playout_s * (control_hz or 10))`, raise `ValueError` (the menu's 5 cm cap makes this unreachable in practice; it is a guard).
 
 - [ ] **Step 1: Failing tests** — build a 14-dim absolute Box with labels `left_x, left_y, left_z, left_yaw, left_pitch, left_roll, left_gripper, right_*`, low/high from the YAM defaults (`x 0.15–0.48, y −0.25–0.25, z 0.03–0.40, yaw ±π, pitch/roll 0, gripper 0–1`), `max_step` `(0.01, 0.01, 0.01, None, None, None, 0.2, ...)`. Assert: a `Move("left","x",0.02,None)` from `left_x=0.30` yields 2 actions ending exactly at 0.32 with other dims unchanged; a 0.5 cm move yields 1 action; a move that would exceed `high` is clipped to `high`; `Move("left",None,0.0,0.0)` from gripper 1.0 yields 5 actions ending at 0.0; hold yields one action equal to current; `gripper_position` returns `(x,y,z)` for each arm; a Box without labels raises `ValueError`; `control_hz` attached to the chunk.
 - [ ] **Step 2: Run; expect ImportError.** **Step 3: Implement** (≤ 100 lines, numpy only). **Step 4: Run tests, ruff, mypy.**
@@ -1387,14 +1431,15 @@ class TagSpec:
     tag_id: int
     object: str
     size_m: float                 # black square edge
-    offset_m: Vec3                # object centre in the TAG's frame (e.g. (0,0,-0.0127) for a face tag on a 25.4 mm cube)
+    offset_m: Vec3                # object centre in the TAG's frame: x right, y down, z INTO the tag (away from
+                                  # the camera), so a face tag on a 25.4 mm cube has offset (0, 0, +0.0127)
 
 @dataclass(frozen=True)
 class TagLayout:
     tags: Mapping[int, TagSpec]
     table_tag_id: int
     @classmethod
-    def load(cls, path: Path) -> TagLayout   # JSON: {"table_tag_id": 20, "tags": [{"id":0,"object":"cube","size_m":0.020,"offset_m":[0,0,-0.0127]}, ...]}
+    def load(cls, path: Path) -> TagLayout   # JSON: {"table_tag_id": 20, "tags": [{"id":0,"object":"cube","size_m":0.020,"offset_m":[0,0,0.0127]}, ...]}
 
 class Detection(Protocol):        # structural match for pupil_apriltags.Detection
     tag_id: int; center: Any; corners: Any; pose_R: Any; pose_t: Any; decision_margin: float
@@ -1402,7 +1447,8 @@ class Detection(Protocol):        # structural match for pupil_apriltags.Detecti
 Detector = Callable[[npt.NDArray[np.uint8], tuple[float, float, float, float], float], Sequence[Detection]]
 #  (gray_image, (fx, fy, cx, cy), tag_size_m) -> detections with pose
 
-def apriltag_detector() -> Detector      # lazy-imports pupil_apriltags; builds Detector(families="tag36h11")
+def apriltag_detector() -> Detector      # lazy-imports pupil_apriltags; builds ONE Detector(families="tag36h11") and
+                                         # reuses it; passes a C-contiguous 2-D uint8 array (detect() asserts uint8)
 
 class Perceiver:
     def __init__(self, *, layout: TagLayout, camera: str, calibration: Calibration,
@@ -1412,9 +1458,9 @@ class Perceiver:
                held: tuple[Arm, str] | None = None) -> WorldState
 ```
 
-`update` algorithm: gray = mean over channels of `observation.images[camera]`; K from `observation.extra[f"{camera}_intrinsics"]` (3×3) → `(fx, fy, cx, cy)`; because detections need one tag size per call, group `layout.tags` by `size_m` and call the detector once per size, keeping only detections whose id has that size. For each detection: `T_tag_cam = pose_to_matrix(pose_R, pose_t)`; if `f"{camera}_depth"` present (array or zero-arg callable returning array, per YAM docs), take the median of finite positive depth in a `depth_window_px` square at `center` and rescale `pose_t` so its z equals that depth; object centre in camera = `transform(T_tag_cam, spec.offset_m)`; per arm: `calibration.to_arm(arm, centre_cam)`. Average all detections per object. Objects with no detection this step keep their previous `ObjectView` (with the old `last_seen_step`); if `held == (arm, name)`, that object's position is overwritten with `grippers[arm].position + grasp_offset_m` and marked seen. Objects never seen are omitted from `WorldState.objects` (the policy treats a missing target as "hold and log", Task 10).
+`update` algorithm: gray = `np.ascontiguousarray(observation.images[camera].mean(axis=2).astype(np.uint8))`; K from `observation.extra[f"{camera}_intrinsics"]` (3×3) → `(fx, fy, cx, cy)`; because detections need one tag size per call, group `layout.tags` by `size_m` and call the detector once per size, keeping only detections whose id has that size. For each detection: `T_tag_cam = pose_to_matrix(pose_R, pose_t)`; if `f"{camera}_depth"` present (array or zero-arg callable returning array, per YAM docs), take the median of finite positive depth in a `depth_window_px` square at `center` and rescale `pose_t` so its z equals that depth; object centre in camera = `transform(T_tag_cam, spec.offset_m)`; per arm: `calibration.to_arm(arm, centre_cam)`. Average all detections per object. Objects with no detection this step keep their previous `ObjectView` (with the old `last_seen_step`); if `held == (arm, name)`, that object's position is overwritten with `grippers[arm].position + grasp_offset_m` and marked seen. Objects never seen are omitted from `WorldState.objects` (the policy treats a missing target as "hold and log", Task 10).
 
-- [ ] **Step 1: Failing tests** — a `FakeDetector` returning scripted detections with identity `pose_R` and chosen `pose_t`; identity calibration for both arms (right arm translated by (0, −0.5, 0)); assert: object centres land where expected including the tag→centre offset; two tags on one object average; a depth image overrides the tag range; an object missing on step 2 keeps its step-1 pose and `steps_since_seen == 1`; `held` substitution; `TagLayout.load` on the fixture file; `apriltag_detector()` raises a clear `ImportError` message when `pupil_apriltags` is absent (monkeypatch `sys.modules`).
+- [ ] **Step 1: Failing tests** — a `FakeDetector` returning scripted detections with identity `pose_R` and chosen `pose_t`; identity calibration for both arms (right arm translated by (0, −0.5, 0)); assert: object centres land where expected including the tag→centre offset (pin the sign: identity `pose_R`, `pose_t=(0,0,0.7)`, offset `(0,0,0.0127)` → centre z `0.7127`); the real-detector wrapper hands a C-contiguous 2-D `uint8` array to a stubbed `Detector` and constructs it once across calls; two tags on one object average; a depth image overrides the tag range; an object missing on step 2 keeps its step-1 pose and `steps_since_seen == 1`; `held` substitution; `TagLayout.load` on the fixture file; `apriltag_detector()` raises a clear `ImportError` message when `pupil_apriltags` is absent (monkeypatch `sys.modules`).
 - [ ] **Step 2–4: Run; implement (≤ 140 lines); run tests, ruff, mypy.**
 - [ ] **Step 5: Commit** — `feat(jev): AprilTag perceiver with bundle fusion, depth refinement, and occlusion memory`.
 
@@ -1446,7 +1492,8 @@ class JevPolicyConfig:
 class JevPolicy(PolicyBase):
     def __init__(self, config: JevPolicyConfig, *, client: DecisionsClient | None = None,
                  perceiver: Perceiver | None = None) -> None
-    def bind(self, embodiment_info: EmbodimentInfo) -> None      # builds MotionMapper from embodiment action space; adopts info.action_space
+    def bind(self, embodiment_info: EmbodimentInfo) -> None      # builds MotionMapper from embodiment action space; adopts info.action_space;
+                                                                 # builds PhaseMachine(config.task, bounds=(low_xyz, high_xyz) of the active labels)
     def reset(self, scene: Scene) -> None                          # clears world/history/transcript/phase
     def act(self, observation: Observation) -> ActionChunk
     def transcript(self) -> list[dict[str, Any]]
@@ -1456,7 +1503,7 @@ class JevPolicy(PolicyBase):
 def jev_policy(**kwargs: Any) -> JevPolicy   # registry entry: parses -P k=v strings (steps_cm "0.5,2,5"), builds config
 ```
 
-`act` algorithm: `eef = observation.state["eef_state"]`; grippers from the mapper; `world = perceiver.update(...)` with `held` set when phase ∈ {grasp-succeeded…lower}; on the first act after reset, `phase = machine.reset(world)` else `machine.advance(world)`. If `phase.name == "done"` → hold chunk with `meta["request_stop"] = True`. If target missing from world or `steps_since_seen > stale_after` and phase is positional → hold chunk, `stalls += 1`, transcript entry with `"stall": True`. Else `state = build_state(...)`, `menu = build_menu(...)`, `answer = client.choose(...)`, `move = parse_option(answer.choice)`, `chunk = mapper.chunk(move, eef)`; append `menu[answer.choice].split(";")[0]` to history; transcript entry `{"step", "phase", "state", "instructions", "menu", "answer": {"choice", "probabilities", "confidence", "model", "usage"}, "actions": len(chunk.actions)}`; return chunk with `meta={"jev": {...same summary...}}`. `DecisionsError` propagates (core wraps it as `PolicyError`).
+`act` algorithm: `eef = observation.state["eef_state"]`; grippers from the mapper; `world = perceiver.update(...)` with `held` set when phase ∈ {grasp-succeeded…lower}; on the first act after reset, `phase = machine.reset(world)` else `machine.advance(world)`. If `phase.name == "done"` → hold chunk whose single `Action.meta` carries `{"request_stop": True, "stop_reason": "task_done", "jev": {...}}` (the rollout reads `request_stop` from `Action.meta`, not chunk meta). If target missing from world or `steps_since_seen > stale_after` and phase is positional → hold chunk, `stalls += 1`, transcript entry with `"stall": True`. Else `state = build_state(...)`, `menu = build_menu(...)`, `answer = client.choose(...)`, `move = parse_option(answer.choice)`, `chunk = mapper.chunk(move, eef)`; append `menu[answer.choice].split(";")[0]` to history; transcript entry `{"step", "phase", "state", "instructions", "menu", "answer": {"choice", "probabilities", "confidence", "model", "usage"}, "actions": len(chunk.actions)}`; every `Action` in every returned chunk (including hold and stall chunks) carries `meta["jev"] = {"phase", "choice", "confidence", "world": {obj: {arm: [x, y, z]}}}` so the scorer can read the final world from `record.steps[-1].action.meta` (scoring runs before `on_trial_end`; approvers preserve `meta`). `on_trial_end` still writes the summary to `record.metadata["jev"]` for the log. `DecisionsError` propagates (core wraps it as `PolicyError`).
 
 `info`: `PolicyInfo(name="jev", action_space=<placeholder Box until bind>)`; `bind` replaces `self.info` with the embodiment's action space, mirroring the agent plugin's embodiment-adaptive pattern.
 
@@ -1475,7 +1522,7 @@ def jev_policy(**kwargs: Any) -> JevPolicy   # registry entry: parses -P k=v str
 ```python
 def cube_in_bowl(*, cube: str = "cube", bowl: str = "bowl", radius_m: float = 0.04, max_above_m: float = 0.03) -> Scorer
 ```
-Reads `record.metadata["jev"]["final_world"]`; success when, in the arm frame used by the policy (`final_world[cube]` and `final_world[bowl]` share keys; use `"left"` if present else `"right"`), horizontal distance ≤ `radius_m` and `cube_z − bowl_z ≤ max_above_m`. Missing metadata → `Score(value=False, explanation="no jev world state recorded")`. `name == "cube_in_bowl"`.
+Reads `record.steps[-1].action.meta["jev"]["world"]` (scoring runs before `on_trial_end`, so `record.metadata` is not available; approvers preserve `Action.meta`). Success when, in the arm frame used by the policy (`world[cube]` and `world[bowl]` share keys; use `"left"` if present else `"right"`), horizontal distance ≤ `radius_m` and `cube_z − bowl_z ≤ max_above_m`. No steps or missing meta → `Score(value=False, explanation="no jev world state recorded")`. `name == "jev_cube_in_bowl"` (same as the entry point).
 
 - [ ] **Steps 1–5:** tests for success, horizontal miss, cube left on the rim (too high), missing metadata; implement (≤ 40 lines); commit `feat(jev): pose-based cube_in_bowl scorer`.
 
@@ -1488,7 +1535,7 @@ Reads `record.metadata["jev"]["final_world"]`; success when, in the arm frame us
 
 `_fake_rig.py`: a minimal `Embodiment` with the 14-dim YAM-like absolute Cartesian action box (labels as in Task 7), `eef_state` observation, a `top_cam` image (zeros, 64×64×3), `top_cam_intrinsics`, a kinematic toy world where a "cube" and "bowl" have fixed positions, the gripper closes to 0.3 when within 1.5 cm of the cube, the cube follows the gripper while closed, and a `FakeDetector` that reports tags at the true object positions (so the perceiver sees a consistent world). A scripted `FakeClient` that always picks the greedy-best option from the menu (computed from the state text's directional words, so the test also exercises the wording round trip).
 
-- [ ] **Step 1:** write the test: `eval(task, JevPolicy(config, client=fake, perceiver=Perceiver(...)), FakeRig(), scorer=[cube_in_bowl()], log_dir=tmp_path)`; assert the log status is success, the score is True, the transcript is present and non-empty, and every step's action stayed within bounds.
+- [ ] **Step 1:** write the test: `task = Task(name="jev-cube-in-bowl", scenes=ListSceneDataset([Scene(id="s0", instruction="put the cube in the bowl")]), scorer=[cube_in_bowl()], max_steps=150)`; `logs = eval(task, JevPolicy(config, client=fake, perceiver=Perceiver(...)), FakeRig(), log_dir=str(tmp_path))`; assert the log status is `"success"`, the trial ended by `request_stop` (`truncated` with `termination_reason` naming the policy stop), the `jev_cube_in_bowl` score is True, the policy transcript is present and non-empty, and every recorded action stayed within the box bounds. (`eval()` has no scorer argument; scorers live on the `Task`.)
 - [ ] **Step 2–4:** run (expect failure until the fakes are right), fix, run the plugin's full suite with `--cov-fail-under=100`.
 - [ ] **Step 5: Commit** — `test(jev): end-to-end eval on a fake Cartesian rig`.
 
@@ -1499,7 +1546,7 @@ Reads `record.metadata["jev"]["final_world"]`; success when, in the arm frame us
 **Files:**
 - Create: `examples/jev_textsim.py` (repo root; the cleaned spike v3b: same menu/wording via the plugin's `build_menu`/`describe_offset`, 30 seeded episodes, prints success rate, exits 1 below 27/30). Mark clearly "requires OPENROUTER_API_KEY; costs < $0.01; not run in CI".
 - Modify: `plugins/inspect-robots-jev/README.md` (install; `.env` keys; tag printing instructions from spec §5 with the table; calibration procedure: run the YAM pose CLI, touch the four table-tag corners with each gripper, paste into `corners.json`, run `python -m inspect_robots_jev.calibrate --corners corners.json --frame <png> --tags tags.json --out calibration.json`), `CLAUDE.md`, root `CHANGELOG.md` (`### Added` entry), root `CLAUDE.md` plugin list (one line).
-- Create: `src/inspect_robots_jev/calibrate.py` (+ `tests/test_calibrate.py`): `main(argv)` that loads corners JSON `{"left": [[x,y,z]*4], "right": [[...]*4]}` and a PNG frame plus intrinsics JSON, runs the detector on the table tag, calls `solve_calibration`, writes the file. Tests use the fake detector and a stub PNG reader.
+- Create: `src/inspect_robots_jev/calibrate.py` (+ `tests/test_calibrate.py`): `main(argv)` that loads corners JSON `{"left": [[x,y,z]*4], "right": [[...]*4]}`, a frame saved as `.npy` (H×W×3 uint8; the README shows a two-line snippet that grabs one observation from the embodiment and `np.save`s `images["top_cam"]` and `extra["top_cam_intrinsics"]`), and an intrinsics `.npy`, runs the detector on the table tag, calls `solve_calibration`, writes the calibration JSON. No PNG decoding (stdlib has none; core `_pngenc` only encodes). Tests use the fake detector and `tmp_path` `.npy` files; missing table tag → exit code 2 with a message naming the tag id.
 
 - [ ] **Steps:** write tests for `calibrate.main` (happy path, missing table tag → exit 2); implement; write docs; run the full plugin gates; commit `docs(jev): README, calibration CLI, live wording probe, changelog`.
 
@@ -1514,9 +1561,18 @@ Add to the plugin README a "Running on the YAM rig" section:
 [embodiment.args]
 control_interface = eef_pos
 top_depth_serial = <D435 serial>      # hands the top slot to librealsense: intrinsics + depth
-cam_width = 1920
+capture_width = 1920                  # NEW in inspect-robots-yam (companion PR): native capture size
+capture_height = 1080
+cam_width = 1920                      # no downscale: tags need every pixel
 cam_height = 1080
 ```
+
+**Companion change (separate PR on `robocurve/inspect-robots-yam`):** add
+`capture_width`/`capture_height` to `YamConfig` (defaults 640/480, so no
+behaviour change for existing rigs), thread them into
+`_capture_proc.REALSENSE_CAPTURE_WIDTH/HEIGHT` and the OpenCV reader's
+`CAP_PROP_FRAME_WIDTH/HEIGHT`, and scale intrinsics from the capture size.
+Merge and release that before the first rig run.
 
 and the command:
 
@@ -1526,7 +1582,7 @@ inspect-robots "put the cube in the bowl" --policy jev \
   --scorer jev_cube_in_bowl --max-steps 120
 ```
 
-Verify during implementation that `YamConfig` accepts non-square `cam_width`/`cam_height` (Task 1 of the rig session, not this plan); if it does not, file an issue on `inspect-robots-yam` and note it here.
+`YamConfig` accepts non-square `cam_width`/`cam_height` today (no square check in `config.py`), so nothing to verify there.
 
 ---
 
@@ -1535,5 +1591,7 @@ Verify during implementation that `YamConfig` accepts non-square `cam_width`/`ca
 **Spec coverage:** §1 client → T3; §2 rules R1–R5 → T4 (hints), T6 (curated wording, history), T5/T10 (code owns phases and completion), T10 (confidence logged in transcript, not gated); §3 layout → T1–T11 file table; §3.1 data flow → T10; §3.1a phases → T5; §3.2/3.3 examples → T6/T4 tests pin them; §4 D1–D9 → T1 (plugin), T9/T10 (perceiver in policy), T5 (phases), T4/T10 (one Choice, arm in id), T7 (own splitter rather than import, since the agent plugin's `Toolset` is not a public API — D5 resolved as "copy"), T3 (two backends), T10 (transcript), T10/T11 (done + scorer), T9/T10 (occlusion, stale hold); §5 → T9 (tags, fusion, depth), T8/T13 (calibration by touch), T14 (camera config), spec `doctor` check deferred to a follow-up issue (noted here so it is not silently dropped); §6 → T7 (bounds), T5 (grasp gate), task `max_steps` (T14 recipe); §7 settings → T10 config; §8 testing → each task + T12; live probe → T13.
 
 **Placeholder scan:** none of TBD/TODO/"handle edge cases". Tasks 5–9 give algorithms and exact interfaces with prose steps rather than full listings; the interfaces are complete and the tests are specified concretely.
+
+**Critique round 1 (fresh-context subagent, 2026-09-19):** 6 major, 6 minor, 2 nits, all folded into this revision: scorer reads the last step's `Action.meta` because `eval()` scores before `on_trial_end`; `Task(scorer=...)` replaces the non-existent `eval(scorer=)`; tag-frame z points into the tag so face offsets are `+half`; YAM captures at a fixed 640 × 480 so a companion `capture_width/height` change is required (Task 14); positional goals are clamped into workspace bounds so the 0.03 m `z` floor cannot deadlock `descend`/`lower`; `ci-ok` needs, `uv.lock`, and the `pypi-jev` environment are called out; uint8 grayscale and single detector construction; `request_stop` on `Action.meta`; arm choice by base distance; motion test without `max_step`; serializer key renamed to `target_point_…` and thresholds sourced from `TaskConfig`; calibrate CLI reads `.npy`; `build_menu` signature and scorer name aligned.
 
 **Type consistency:** `Move(arm, axis, delta_m, gripper)` used identically in T4/T7/T10; `WorldState.offset/steps_since_seen` in T5/T6/T10; `Phase(name, arm, target, menu_kind, goal)` in T5/T6/T10; `ChoiceAnswer` fields in T3/T10; `Calibration.to_arm` in T8/T9; `GripperView(position, opening)` in T2/T5/T9/T10.
