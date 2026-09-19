@@ -51,6 +51,7 @@ from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
 from inspect_robots.task import Task
+from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
     from inspect_robots.console import OperatorInput
@@ -301,6 +302,13 @@ def eval(
 
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
 
+    Before a grader runs, an embodiment's optional duck-typed
+    ``observe_parked()`` hook may move the robot to its parked/rest pose so the
+    cameras see the scene unobstructed and return one fresh ``Observation``.
+    Returning ``None`` declines. Other failures degrade with a
+    ``RuntimeWarning`` and grading uses the last-step frames, except
+    ``SafetyAbort`` and ``EmbodimentFault``, which halt the eval.
+
     ``before_scoring`` is called exactly once per trial that will be scored
     (never for errored or cancelled trials, which are recorded but not
     scored), after the rollout returns and before the scorers run. It may
@@ -375,6 +383,8 @@ def _run_eval(
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
+    from inspect_robots.session import _DEFINITIVE_REASONS
+    from inspect_robots.types import Observation
 
     # Embodiment-adaptive policies (plan 0008 §3c): an optional bind() hook
     # runs before the compatibility check so the policy can adopt the
@@ -470,6 +480,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        judgement_sources: list[str | None] = []
         notes: list[str | None] = []
         trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
@@ -556,12 +567,41 @@ def _run_eval(
                     if record.status == "error":
                         errored_trials += 1
                     judgements.append(None)
+                    judgement_sources.append(None)
                     notes.append(None)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
                         # will read — an operator verdict on a crashed trial
                         # would be dead data (errored trials are never scored).
+                        if record.operator_judgement is None and not (
+                            record.terminated and record.termination_reason in _DEFINITIVE_REASONS
+                        ):
+                            observe_parked = getattr(embodiment, "observe_parked", None)
+                            if callable(observe_parked):
+                                try:
+                                    parked_observation = observe_parked()
+                                except (SafetyAbort, EmbodimentFault):
+                                    raise
+                                except Exception as exc:
+                                    warnings.warn(
+                                        "embodiment.observe_parked() failed with "
+                                        f"{type(exc).__name__}: {exc}; grading from "
+                                        "last-step frames",
+                                        RuntimeWarning,
+                                        stacklevel=2,
+                                    )
+                                else:
+                                    if isinstance(parked_observation, Observation):
+                                        record.parked_observation = parked_observation
+                                    elif parked_observation is not None:
+                                        warnings.warn(
+                                            "embodiment.observe_parked() returned "
+                                            f"{type(parked_observation).__name__}; expected "
+                                            "Observation or None; grading from last-step frames",
+                                            RuntimeWarning,
+                                            stacklevel=2,
+                                        )
                         before_scoring(record, scene)
                     epoch_values: dict[str, float] = {}
                     for scorer in scorers:
@@ -570,10 +610,11 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     # Captured at the same instant as the judgement, on purpose:
-                    # the two are documented as strictly parallel, so a later
+                    # these fields are documented as strictly parallel, so a later
                     # mutation (e.g. from policy.on_trial_end) must not be able
-                    # to reach one of them and miss the other.
+                    # to reach one of them and miss the others.
                     judgements.append(record.operator_judgement)
+                    judgement_sources.append(judgement_source(record))
                     notes.append(record.operator_note)
 
                 # A never-reset trial must not persist the previous trial's
@@ -661,6 +702,7 @@ def _run_eval(
                 instruction=scene.instruction,
                 scene_metadata=scene_metadata,
                 operator_judgements=tuple(judgements),
+                judgement_sources=tuple(judgement_sources),
                 operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
@@ -727,6 +769,50 @@ def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:
     return errors >= fail_on_error
 
 
+def _component_name(component: Policy | Embodiment) -> str:
+    """Return a component's declared name without masking an earlier failure."""
+    try:
+        return component.info.name
+    except Exception:
+        return type(component).__name__
+
+
+def _error_log_for(
+    task: Task | str,
+    policy: Policy | str,
+    embodiment: Embodiment | str,
+    *,
+    seed: int | None,
+    exc: Exception,
+) -> EvalLog:
+    """Describe a task failure that occurred before or outside log production."""
+    now = _now_iso()
+    return EvalLog(
+        version=EvalLog.SCHEMA_VERSION,
+        status="error",
+        eval=EvalSpec(
+            task=task if isinstance(task, str) else task.name,
+            policy=policy if isinstance(policy, str) else _component_name(policy),
+            embodiment=(embodiment if isinstance(embodiment, str) else _component_name(embodiment)),
+            created=now,
+            inspect_robots_version=__version__,
+            git_commit=_git_commit(),
+            seed=seed,
+            max_steps=None if isinstance(task, str) else task.max_steps,
+            max_seconds=None if isinstance(task, str) else task.max_seconds,
+        ),
+        results=EvalResults(total_scenes=0, total_trials=0),
+        stats=EvalStats(
+            started_at=now,
+            completed_at=now,
+            duration_s=0.0,
+            total_steps=0,
+        ),
+        samples=(),
+        error=f"{type(exc).__name__}: {exc}",
+    )
+
+
 def eval_set(
     tasks: Task | str | Sequence[Task | str],
     policy: Policy | str,
@@ -748,7 +834,21 @@ def eval_set(
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
-    ``success`` is ``True`` iff every task's log has ``status == "success"``.
+    ``success`` is ``True`` iff every returned log has ``status == "success"``.
+    A task that raises before or without producing a log contributes one
+    ``status="error"`` log carrying the exception text, and the remaining
+    tasks still run. A ``SafetyAbort`` or ``EmbodimentFault`` that escapes
+    ``eval()`` (raised outside a trial) and ``KeyboardInterrupt`` still
+    propagate. A halt inside a trial ends that task with an error log and the
+    set continues to the next task.
+    ``CompatibilityError``, unknown policy or embodiment registry names, and
+    task-factory ``ConfigError`` are therefore reported once per affected
+    task. Only grading configuration errors raised before the task loop
+    propagate.
+
+    With a string embodiment, a non-safety exception from ``close()`` can
+    produce an error row even when that task's completed JSON log is already
+    on disk.
 
     ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 
@@ -768,23 +868,36 @@ def eval_set(
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
     logs: list[EvalLog] = []
     for task in task_list:
-        logs.extend(
-            eval(
-                task,
-                policy,
-                embodiment,
-                log_dir=log_dir,
-                sinks=sinks,
-                seed=seed,
-                fail_on_error=fail_on_error,
-                controller=controller,
-                approver=approver,
-                remap=remap,
-                store_frames=store_frames,
-                store_actions=store_actions,
-                operator_input=operator_input,
-                before_scoring=before_scoring,
+        try:
+            logs.extend(
+                eval(
+                    task,
+                    policy,
+                    embodiment,
+                    log_dir=log_dir,
+                    sinks=sinks,
+                    seed=seed,
+                    fail_on_error=fail_on_error,
+                    controller=controller,
+                    approver=approver,
+                    remap=remap,
+                    store_frames=store_frames,
+                    store_actions=store_actions,
+                    operator_input=operator_input,
+                    before_scoring=before_scoring,
+                )
             )
-        )
+        except (SafetyAbort, EmbodimentFault):
+            raise
+        except Exception as exc:
+            logs.append(
+                _error_log_for(
+                    task,
+                    policy,
+                    embodiment,
+                    seed=seed,
+                    exc=exc,
+                )
+            )
     success = all(log.status == "success" for log in logs)
     return success, logs

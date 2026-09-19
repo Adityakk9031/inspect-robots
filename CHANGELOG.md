@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- `plugins/inspect-robots-jev/`: TypeSafe's **Jev** structured-decision model
+- **Plugin:** `plugins/inspect-robots-jev/`: TypeSafe's **Jev** structured-decision model
   as the policy `jev` (plan 0076). Jev is text-only and picks one option from
   a menu, so the plugin reads AprilTag poses from the top camera, writes a
   curated world state in directional words, asks one Choice question per step
@@ -19,8 +19,57 @@ All notable changes to this project are documented here. The format is based on
   `python -m inspect_robots_jev.calibrate` camera-to-arm tool, and
   `examples/jev_textsim.py`, a live wording-regression probe.
 
+- **Setup wizard:** embodiment plugins can declare bounded numeric settings,
+  including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
+  ([plan 0081](plans/0081-number-slots.md),
+  [#432](https://github.com/robocurve/inspect-robots/issues/432)).
+
+- **Docs:** new guide page of example commands covering model selection,
+  reasoning-effort levels, VLA policies (MolmoAct 2, Pi 0/0.5 via XPolicyLab),
+  control interfaces, instruction sources, operator interfaces, and eval sets
+  ([docs/guide/examples.md](docs/guide/examples.md)).
+
+- **Core:** evaluation logs now record which path produced each operator
+  judgement in `SceneResult.judgement_sources`
+  ([plan 0080](plans/0080-judgement-sources.md),
+  [#413](https://github.com/robocurve/inspect-robots/issues/413)).
+
+- **Core:** `is_affirmative_verdict()` is public API. It owns the whole
+  operator-verdict contract (the recognized affirmative vocabulary plus the
+  case-insensitive, whitespace-tolerant comparison and the "no judgement
+  recorded" case), so benchmarks grading real-world runs can share it instead
+  of copying the vocabulary and importing the private `scorer._OPERATOR_SUCCESS`.
+
 ### Fixed
 
+- **Core:** `eval_set()` now preserves completed task logs when a later task
+  raises, reports the failure as an in-memory error log, and continues with
+  the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
+  `eval()` (raised outside a trial) and `KeyboardInterrupt` still propagate. A
+  halt inside a trial ends that task with an error log and, as before this
+  change, the set continues to the next task
+  ([plan 0079](plans/0079-eval-set-error-log.md),
+  [#298](https://github.com/robocurve/inspect-robots/issues/298)).
+
+- **Core:** rollout now rejects non-finite and non-numeric actions before they
+  reach an embodiment. A NaN action on the default CLI chain now errors the
+  trial as a `PolicyError` and continues under `fail_on_error=False`, instead
+  of halting the eval. A non-finite action introduced by an approver is a
+  `SafetyAbort` ([plan 0077](plans/0077-rollout-nonfinite-actions.md),
+  [#356](https://github.com/robocurve/inspect-robots/issues/356)).
+
+- **Core:** an escaped quote no longer terminates a quoted `.env` value, while
+  backslashes stay literal; a quoted value ending in a lone backslash is now
+  kept literally with its quotes
+  ([plan 0078](plans/0078-dotenv-escaped-quote.md),
+  [#291](https://github.com/robocurve/inspect-robots/issues/291)).
+
+- **Agent plugin (0.26.0):** absolute-target control no longer fails when an
+  embodiment exposes several state fields of the action's shape (e.g. a 14-D
+  `joint_pos` next to a 14-D Cartesian `eef_state`): the toolset now prefers
+  the field whose canonical key family (`joint_*`/`eef_*`) matches the
+  declared control mode, and only raises when that preference is still
+  ambiguous. Unlocks full 6-DoF EEF layouts in inspect-robots-yam.
 - **Core:** the shared chat wire behind task generation, the `vlm` grader,
   and summarize now retries once with `max_completion_tokens` when a 400
   response names that parameter, so OpenAI reasoning models that reject
@@ -40,6 +89,15 @@ All notable changes to this project are documented here. The format is based on
   [#343](https://github.com/robocurve/inspect-robots/issues/343)).
 
 ### Changed
+
+- **Core:** when `FrameStore` is active, both the pre-action and post-action
+  observations recorded in each `StepRecord` now omit inline camera arrays.
+  Consumers that previously read terminal images from
+  `step.result.observation.images` must load `step.result_image_refs` instead;
+  `step.image_refs` remains the pre-action mapping. A trial with `n` completed
+  steps stores the reset frame at index `0` and each post-action frame at
+  `t + 1`; a camera present throughout therefore produces `n + 1` files
+  ([#209](https://github.com/robocurve/inspect-robots/pull/209)).
 
 - **Core:** the `--epochs` below-1 guard in `run` and `eval-set` now lives in
   one shared helper, and its error reads `--epochs must be >= 1, got 0`
@@ -235,11 +293,6 @@ All notable changes to this project are documented here. The format is based on
   `messages`); construction guards now diagnose explicit wire conflicts,
   Messages endpoint routing mistakes, and possible silent tool drops on an
   explicit Chat Completions endpoint (plan 0044, #278).
-
-- `FrameStore` now persists each post-action observation once and exposes it
-  through `StepRecord.result_image_refs`. Stored records strip camera arrays
-  from both pre-action and post-action observations, and the terminal visual
-  state is recoverable for offline scoring.
 
 - The Rerun sink now sends a per-trial blueprint that groups labeled action
   dimensions by arm, overlays aligned measured state, and lays out cameras,
@@ -638,6 +691,11 @@ All notable changes to this project are documented here. The format is based on
   regression (`eef_delta_pose` + `rot6d` already reached the displacement
   clamp path before #143/#144). `euler_xyz` and `axis_angle` deltas have no
   such problem and remain guardrail-conformant.
+- **Agent policy configuration parameters now strictly reject non-strings**
+  in `LLMAgentPolicy` constructor, raising a guided `ConfigError` (#169). This
+  prevents unquoted CLI values (e.g., `-P model=42` or `-P api_key_env=false`)
+  from causing downstream errors or incorrect fallback logic, prompting the
+  user to pass quoted strings instead.
 - **An explicit invalid `--max-action-delta` now fails fast instead of silently
   running with weaker guardrails** (#154). Non-finite or non-positive values
   were previously caught by `_build_guardrails`'s degrade-per-component path

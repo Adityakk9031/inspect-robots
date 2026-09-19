@@ -199,7 +199,8 @@ file) stop the run before the robot moves. After a rollout the grader never
 crashes the run: transport failures or an unparseable reply leave the trial
 ungraded with a stderr note. A trial the embodiment already terminated with a
 definitive `success` or `failure`, or one the operator already judged from
-the console, is adopted without spending a model call.
+the console, is adopted without spending a model call. The log records which
+path produced each verdict in `judgement_sources`.
 
 ### Live operator feedback
 
@@ -278,7 +279,8 @@ legacy path prints it for an accepting policy.
 
 The interactive first-run wizard: it prompts for each `[defaults]` key with
 a suggested value (Enter accepts, typing overrides), warns when a chosen
-policy or embodiment is not registered in the current environment, and then
+policy or embodiment is not registered in the current environment, offers
+the `agent` policy's on-demand camera mode (`images = on_demand`), and then
 helps assign camera devices. It lists every color-capable camera that udev
 names under `/dev/v4l`, preferring
 `/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`
@@ -472,7 +474,11 @@ Rather than one full summary per task, the CLI prints the resolved
 policy/embodiment, one status line for the whole set, a compact `[status]
 task_name  metrics-or-error` row per task, and the shared log directory once
 (`eval_set` still writes one `EvalLog` per task inside it). The exit code is
-`0` iff every task's log has `status == "success"`.
+`0` iff every task's log has `status == "success"`. A task that raises before
+producing a log contributes an in-memory error row and the remaining tasks
+still run. A `SafetyAbort` or `EmbodimentFault` that escapes `eval()` (raised
+outside a trial) and `KeyboardInterrupt` still propagate. A halt inside a
+trial ends that task with an error log and the set continues to the next task.
 
 `--retry-attempts` is accepted and threaded through to `eval_set()`, whose
 resumption-of-a-partial-run behavior is reserved for a follow-up: passing it
