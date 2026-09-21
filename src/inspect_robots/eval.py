@@ -10,6 +10,7 @@ slice accepts already-constructed objects; registry-string resolution
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import time
@@ -332,6 +333,15 @@ def eval(
     rollout) if the policy and embodiment are incompatible, and
     [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer.
     """
+    if not isinstance(fail_on_error, bool) and not (
+        isinstance(fail_on_error, (int, float))
+        and math.isfinite(fail_on_error)
+        and fail_on_error >= 0
+    ):
+        raise ConfigError(
+            f"fail_on_error must be a boolean or finite float >= 0, got {fail_on_error!r}"
+        )
+
     from inspect_robots.registry import resolve
 
     before_scoring = _grading_hook(grader, before_scoring)
