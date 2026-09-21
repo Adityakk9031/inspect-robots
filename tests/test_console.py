@@ -7,6 +7,7 @@ import select
 import sys
 import types
 from collections.abc import Callable
+from typing import TypeVar
 
 import pytest
 
@@ -21,20 +22,22 @@ from inspect_robots.console import (
     _stdin_readable,
 )
 
+_ChunkT = TypeVar("_ChunkT", bound=str | None)
+
 
 def _scripted_source(
-    chunks: list[str],
-) -> tuple[Callable[[], bool], Callable[[], str]]:
+    chunks: list[_ChunkT],
+) -> tuple[Callable[[], bool], Callable[[], _ChunkT]]:
     def readable() -> bool:
         return bool(chunks)
 
-    def read() -> str:
+    def read() -> _ChunkT:
         return chunks.pop(0)
 
     return readable, read
 
 
-def _console(chunks: list[str], output: list[str] | None = None) -> OperatorConsole:
+def _console(chunks: list[_ChunkT], output: list[str] | None = None) -> OperatorConsole:
     readable, read = _scripted_source(chunks)
     return OperatorConsole(
         readable=readable,
@@ -230,7 +233,8 @@ def test_begin_trial_latches_always_readable_eof_without_spinning() -> None:
 
 
 def test_operator_console_satisfies_runtime_protocol() -> None:
-    readable, read = _scripted_source([])
+    chunks: list[str] = []
+    readable, read = _scripted_source(chunks)
     console = OperatorConsole(readable=readable, read=read)
 
     assert isinstance(console, OperatorInput)
@@ -267,7 +271,25 @@ def test_stdin_read_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _stdin_read() == "/stop\n"
 
 
-def test_console_backspace_editing_and_extended_keys() -> None:
+def test_stdin_read_windows_extended_key_only_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    chars = ["\xe0", "H"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read() is None
+
+
+def test_stdin_read_windows_empty_returns_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: False  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read() == ""
+
+
+def test_console_backspace_editing() -> None:
     # 1. Type /stox, Backspace, p, Enter in a single poll, plus backspace on empty buffer
     console = _console(["\x08/stox\x08p\n"])
     poll = console.poll()
@@ -275,20 +297,33 @@ def test_console_backspace_editing_and_extended_keys() -> None:
     assert poll.messages == ()
 
     # 2. Backspace editing across polls
-    chunks: list[str] = ["/stox"]
+    chunks: list[str | None] = ["/stox"]
     console = _console(chunks)
     assert console.poll() == ConsolePoll()  # first poll has incomplete line
     chunks.append("\x08p\n")
     poll2 = console.poll()
     assert poll2.end == EndRequest()
 
-    # 3. Navigation / extended keys do not contaminate command
-    console = _console(["/stop\xe0K\n"])
-    assert console.poll().end == EndRequest()
+    # 3. Backspace in chunk after a newline does not corrupt previous command
+    console = _console(["/stop\n\x08hello\n"])
+    poll3 = console.poll()
+    assert poll3.end == EndRequest()
+    assert poll3.messages == ("hello",)
 
-    # 4. Extended key split across polls
-    chunks = ["/stop\xe0"]
-    console = _console(chunks)
-    assert console.poll() == ConsolePoll()
-    chunks.append("K\n")
-    assert console.poll().end == EndRequest()
+
+def test_console_unicode_preserves_accents() -> None:
+    console = _console(["déjà vu\n"])
+    poll = console.poll()
+    assert poll.messages == ("déjà vu",)
+    assert poll.end is None
+
+
+def test_console_ignored_keys_do_not_latch_eof() -> None:
+    console = _console([None, "/stop\n"])
+    poll = console.poll()
+    assert poll.end == EndRequest()
+    assert console._eof is False
+
+    console2 = _console([None])
+    console2.begin_trial()
+    assert console2._eof is False

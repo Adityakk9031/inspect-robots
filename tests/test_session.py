@@ -756,13 +756,13 @@ class _ScriptedFd:
     ``poll()`` calls (exercising state that must persist across polls).
     """
 
-    def __init__(self, chunks: list[bytes] | None = None) -> None:
-        self.chunks: list[bytes] = list(chunks) if chunks is not None else []
+    def __init__(self, chunks: list[bytes | None] | None = None) -> None:
+        self.chunks: list[bytes | None] = list(chunks) if chunks is not None else []
 
     def readable(self) -> bool:
         return bool(self.chunks)
 
-    def read(self) -> bytes:
+    def read(self) -> bytes | None:
         return self.chunks.pop(0)
 
 
@@ -2033,7 +2033,7 @@ def test_stale_pump_error_is_cleared_on_window_close() -> None:
     def readable() -> bool:
         return bool(raising) or fd.readable()
 
-    def read() -> bytes:
+    def read() -> bytes | None:
         if raising:
             raise RuntimeError("boom")
         return fd.read()
@@ -2100,6 +2100,55 @@ def test_session_read_bytes_windows_unicode_and_arrows(monkeypatch: pytest.Monke
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
     assert _stdin_read_bytes() == "café\n".encode()
+
+
+def test_session_read_bytes_windows_extended_key_only_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chars = ["\xe0", "K"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() is None
+
+
+def test_session_read_bytes_windows_empty_returns_empty_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: False  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() == b""
+
+
+def test_session_ignored_keys_do_not_latch_eof() -> None:
+    # 1. Plain mode does not latch EOF on None
+    fd = _ScriptedFd([None, b"/stop\n"])
+    session = OperatorSession(
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+    )
+    poll = session.poll()
+    assert poll.end == EndRequest()
+
+    # 2. Footer mode does not latch EOF on None during enter_footer or pump_input
+    fd_footer = _ScriptedFd([None])
+    output: list[str] = []
+    session_footer = OperatorSession(
+        write=output.append,
+        fd_readable=fd_footer.readable,
+        fd_read=fd_footer.read,
+        width_fn=lambda: 80,
+    )
+    session_footer._enter_footer()
+    assert session_footer._pump_eof is False
+
+    fd_footer.chunks.append(None)
+    session_footer._pump_input()
+    assert session_footer._pump_eof is False
 
 
 def test_session_try_enter_footer_retains_plain_mode_when_termios_fails() -> None:

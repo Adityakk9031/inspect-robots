@@ -77,12 +77,14 @@ def _stdin_readable() -> bool:
         return False
 
 
-def _stdin_read() -> str:
+def _stdin_read() -> str | None:
     if sys.platform == "win32":  # pragma: no cover
         import msvcrt
 
         chars: list[str] = []
+        has_keys = False
         while msvcrt.kbhit():
+            has_keys = True
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):
                 if msvcrt.kbhit():
@@ -91,8 +93,11 @@ def _stdin_read() -> str:
             if ch == "\r":
                 ch = "\n"
             chars.append(ch)
+        if not chars:
+            return None if has_keys else ""
         return "".join(chars)
-    return os.read(sys.stdin.fileno(), 65536).decode("utf-8", errors="replace")  # pragma: no cover
+    raw = os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
+    return raw.decode("utf-8", errors="replace")  # pragma: no cover
 
 
 def _parse(line: str) -> tuple[str | None, EndRequest | None, bool]:
@@ -130,7 +135,7 @@ class OperatorConsole:
     def __init__(
         self,
         readable: Callable[[], bool] | None = None,
-        read: Callable[[], str] | None = None,
+        read: Callable[[], str | None] | None = None,
         output_fn: Callable[[str], None] = print,
         usage: str = USAGE,
     ) -> None:
@@ -140,7 +145,6 @@ class OperatorConsole:
         self._usage = usage
         self._buffer = ""
         self._eof = False
-        self._extended_pending = False
 
     def poll(self) -> ConsolePoll:
         """Drain available bytes and return parsed complete lines, never unfinished input."""
@@ -152,32 +156,29 @@ class OperatorConsole:
         usage_requested = False
         while self._readable():
             chunk = self._read()
+            if chunk is None:
+                continue
             if chunk == "":
                 self._eof = True
                 self._buffer = ""
-                self._extended_pending = False
                 break
             for ch in chunk:
-                if self._extended_pending:
-                    self._extended_pending = False
-                    continue
-                if ch in ("\x00", "\xe0"):
-                    self._extended_pending = True
-                    continue
                 if ch in ("\x08", "\x7f"):
                     if self._buffer:
                         self._buffer = self._buffer[:-1]
                     continue
+                if ch == "\n":
+                    line = self._buffer
+                    self._buffer = ""
+                    message, parsed_end, show_usage = _parse(f"{line}\n")
+                    if message is not None:
+                        messages.append(message)
+                    if parsed_end is not None and end is None:
+                        end = parsed_end
+                    if show_usage:
+                        usage_requested = True
+                    continue
                 self._buffer += ch
-            while "\n" in self._buffer:
-                line, self._buffer = self._buffer.split("\n", 1)
-                message, parsed_end, show_usage = _parse(f"{line}\n")
-                if message is not None:
-                    messages.append(message)
-                if parsed_end is not None and end is None:
-                    end = parsed_end
-                if show_usage:
-                    usage_requested = True
         if usage_requested:
             # At most one reminder per poll: Enter autorepeat queues many empty
             # lines, and each print is a full footer repaint.
@@ -190,8 +191,10 @@ class OperatorConsole:
             return
 
         self._buffer = ""
-        self._extended_pending = False
         while self._readable():
-            if self._read() == "":
+            chunk = self._read()
+            if chunk is None:
+                continue
+            if chunk == "":
                 self._eof = True
                 return
