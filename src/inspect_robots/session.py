@@ -76,22 +76,23 @@ def _stdin_read_bytes() -> bytes:
     if sys.platform == "win32":  # pragma: no cover
         import msvcrt
 
-        bytes_list = []
+        chars: list[str] = []
         while msvcrt.kbhit():
-            b = msvcrt.getch()
-            if b == b"\r":
-                b = b"\n"
-            bytes_list.append(b)
-        return b"".join(bytes_list)
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
+            if ch == "\r":
+                ch = "\n"
+            chars.append(ch)
+        return "".join(chars).encode()
     return os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
 
 
 def _enter_cbreak() -> object:
     """Enter stdin cbreak mode without echo and return the exact attributes to restore."""
-    try:  # pragma: no cover
-        import termios  # pragma: no cover
-    except ImportError:  # pragma: no cover
-        return _NO_TERMIOS_STATE
+    import termios  # pragma: no cover
 
     fd = sys.stdin.fileno()  # pragma: no cover
     saved = termios.tcgetattr(fd)  # pragma: no cover
@@ -108,10 +109,7 @@ def _restore(state: object) -> None:
     """Restore one exact termios snapshot returned by ``_enter_cbreak``."""
     if state is _NO_TERMIOS_STATE:  # pragma: no cover
         return
-    try:  # pragma: no cover
-        import termios  # pragma: no cover
-    except ImportError:  # pragma: no cover
-        return
+    import termios  # pragma: no cover
 
     fd, attrs = cast(tuple[int, list[Any]], state)  # pragma: no cover
     termios.tcsetattr(fd, termios.TCSANOW, attrs)  # pragma: no cover
@@ -446,6 +444,8 @@ class OperatorSession:
             if not self._isatty_fn():
                 return
             saved_state = self._raw_mode_fn()
+            if saved_state is _NO_TERMIOS_STATE:
+                return
         except Exception:
             return
 

@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import time
+import types
 from collections.abc import Callable
 
 import pytest
@@ -25,7 +26,14 @@ from inspect_robots.errors import EmbodimentFault
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import operator_scorer
-from inspect_robots.session import _ESC_GRACE_S, _NOTES_PROMPT, _PROMPT, OperatorSession
+from inspect_robots.session import (
+    _ESC_GRACE_S,
+    _NO_TERMIOS_STATE,
+    _NOTES_PROMPT,
+    _PROMPT,
+    OperatorSession,
+    _stdin_read_bytes,
+)
 
 
 class _RecordingConsole(OperatorConsole):
@@ -563,6 +571,14 @@ def test_prompt_operator_warns_before_judging_step_limited_trial() -> None:
 
     assert output == ["note: this trial hit the step limit before terminating\n"]
     assert record.operator_judgement == "n"
+
+
+def test_prompt_operator_warns_on_unrecognized_answer() -> None:
+    session, _prompts, output = _scripted_prompt_session(["invalid", "y", ""])
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
+    assert output == ["unrecognized answer 'invalid'; expected one of y/n/partial/skip\n"]
+    assert record.operator_judgement == "y"
 
 
 @pytest.mark.parametrize(
@@ -2074,3 +2090,52 @@ def test_atexit_restore_stops_a_live_pump() -> None:
     finally:
         session.end_trial()
     assert len(restores) == 1
+
+
+def test_session_read_bytes_windows_unicode_and_arrows(monkeypatch: pytest.MonkeyPatch) -> None:
+    chars = ["c", "a", "f", "é", "\xe0", "K", "\r"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() == "café\n".encode()
+
+
+def test_session_try_enter_footer_retains_plain_mode_when_termios_fails() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    # 1. raw_mode_fn returns _NO_TERMIOS_STATE
+    session1 = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: _NO_TERMIOS_STATE,
+        restore_fn=lambda _state: None,
+    )
+    session1.enable_footer(label="sent", echo_interval_s=0.001)
+    session1.begin_trial()
+    assert session1._footer_active is False
+    assert session1._pump_thread is None
+    session1.end_trial()
+
+    # 2. raw_mode_fn raises ImportError
+    def failing_raw_mode() -> object:
+        raise ImportError("No module named 'termios'")
+
+    session2 = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=failing_raw_mode,
+        restore_fn=lambda _state: None,
+    )
+    session2.enable_footer(label="sent", echo_interval_s=0.001)
+    session2.begin_trial()
+    assert session2._footer_active is False
+    assert session2._pump_thread is None
+    session2.end_trial()

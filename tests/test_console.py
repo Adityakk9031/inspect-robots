@@ -258,10 +258,37 @@ def test_stdin_readable_windows_kbhit(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_stdin_read_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    chars = ["h", "i", "\r"]
+    chars = ["/", "s", "t", "o", "p", "\xe0", "K", "\r"]
     fake_msvcrt = types.ModuleType("msvcrt")
     fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
     fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
-    assert _stdin_read() == "hi\n"
+    assert _stdin_read() == "/stop\n"
+
+
+def test_console_backspace_editing_and_extended_keys() -> None:
+    # 1. Type /stox, Backspace, p, Enter in a single poll, plus backspace on empty buffer
+    console = _console(["\x08/stox\x08p\n"])
+    poll = console.poll()
+    assert poll.end == EndRequest()
+    assert poll.messages == ()
+
+    # 2. Backspace editing across polls
+    chunks: list[str] = ["/stox"]
+    console = _console(chunks)
+    assert console.poll() == ConsolePoll()  # first poll has incomplete line
+    chunks.append("\x08p\n")
+    poll2 = console.poll()
+    assert poll2.end == EndRequest()
+
+    # 3. Navigation / extended keys do not contaminate command
+    console = _console(["/stop\xe0K\n"])
+    assert console.poll().end == EndRequest()
+
+    # 4. Extended key split across polls
+    chunks = ["/stop\xe0"]
+    console = _console(chunks)
+    assert console.poll() == ConsolePoll()
+    chunks.append("K\n")
+    assert console.poll().end == EndRequest()

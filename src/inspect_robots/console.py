@@ -81,9 +81,13 @@ def _stdin_read() -> str:
     if sys.platform == "win32":  # pragma: no cover
         import msvcrt
 
-        chars = []
+        chars: list[str] = []
         while msvcrt.kbhit():
             ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
             if ch == "\r":
                 ch = "\n"
             chars.append(ch)
@@ -136,6 +140,7 @@ class OperatorConsole:
         self._usage = usage
         self._buffer = ""
         self._eof = False
+        self._extended_pending = False
 
     def poll(self) -> ConsolePoll:
         """Drain available bytes and return parsed complete lines, never unfinished input."""
@@ -150,8 +155,20 @@ class OperatorConsole:
             if chunk == "":
                 self._eof = True
                 self._buffer = ""
+                self._extended_pending = False
                 break
-            self._buffer += chunk
+            for ch in chunk:
+                if self._extended_pending:
+                    self._extended_pending = False
+                    continue
+                if ch in ("\x00", "\xe0"):
+                    self._extended_pending = True
+                    continue
+                if ch in ("\x08", "\x7f"):
+                    if self._buffer:
+                        self._buffer = self._buffer[:-1]
+                    continue
+                self._buffer += ch
             while "\n" in self._buffer:
                 line, self._buffer = self._buffer.split("\n", 1)
                 message, parsed_end, show_usage = _parse(f"{line}\n")
@@ -173,6 +190,7 @@ class OperatorConsole:
             return
 
         self._buffer = ""
+        self._extended_pending = False
         while self._readable():
             if self._read() == "":
                 self._eof = True
