@@ -791,7 +791,8 @@ class LLMAgentPolicy(PolicyBase):
             pinned = self._toolset.pinned_labels
             if pinned:
                 formatted += (
-                    f"\nPinned dimensions: {', '.join(pinned)} (fixed; do not attempt to move them)."
+                    "\nPinned dimensions: "
+                    f"{', '.join(pinned)} (fixed; do not attempt to move them)."
                 )
         if self._prior_learnings_text is not None:
             formatted = (

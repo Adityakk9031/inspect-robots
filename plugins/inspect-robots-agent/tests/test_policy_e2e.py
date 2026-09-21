@@ -791,6 +791,13 @@ def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
     assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="(unbound)", budget=100)
 
 
+_CUBEPICK_BOUNDS = (
+    "\n\nEmbodiment bounds:\n"
+    "Per-dimension bounds: dx: [-0.1, 0.1], dy: [-0.1, 0.1].\n"
+    "Pinned dimensions: dx, dy (fixed; do not attempt to move them)."
+)
+
+
 def test_embodiment_docs_are_appended_verbatim_after_formatting() -> None:
     docs = '  Keep {x/y} literal.\n```json\n{"open": 1}\n```  '
     info = replace(CubePickEmbodiment().info, docs=docs)
@@ -805,6 +812,7 @@ def test_embodiment_docs_are_appended_verbatim_after_formatting() -> None:
         _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
         + "\n\nEmbodiment notes:\n"
         + docs.strip()
+        + _CUBEPICK_BOUNDS
     )
 
 
@@ -818,7 +826,9 @@ def test_absent_embodiment_docs_leave_the_prompt_unchanged(docs: str | None) -> 
     transcript = policy.transcript()
 
     assert transcript is not None
-    assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+    assert transcript[0]["content"] == (
+        _SYSTEM_TEMPLATE.format(name="cubepick", budget=100) + _CUBEPICK_BOUNDS
+    )
 
 
 def test_prior_learnings_follow_embodiment_docs_and_record_provenance(
@@ -843,6 +853,7 @@ def test_prior_learnings_follow_embodiment_docs_and_record_provenance(
         _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
         + "\n\nEmbodiment notes:\n"
         + docs
+        + _CUBEPICK_BOUNDS
         + _PRIOR_LEARNINGS_FRAME
         + learnings
     )
