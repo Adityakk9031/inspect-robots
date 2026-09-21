@@ -263,6 +263,7 @@ def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
 def test_frame_store_long_names_truncated_and_safe_regression(tmp_path: Path) -> None:
     import sys
     import zlib
+
     from inspect_robots.frames import _safe
 
     # (a) Collision check: two long names identical for first 100 chars map to distinct paths
