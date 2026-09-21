@@ -335,7 +335,7 @@ def _camera_view_state(
         active_is_by_id = bool(by_id_rows) or not by_path_rows
         advertise_path_toggle = len(by_path_rows) > len(by_id_rows)
 
-    if by_id_rows == by_path_rows:
+    if not active_is_by_id and by_id_rows == by_path_rows:
         advertise_path_toggle = False
 
     return active_is_by_id, advertise_path_toggle
