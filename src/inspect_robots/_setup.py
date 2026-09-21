@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import math
 import os
 import re
 import struct
@@ -13,7 +14,14 @@ from functools import partial
 from pathlib import Path
 from typing import IO
 
-from inspect_robots.conformance import DeviceSlot, OptionSlot, device_slots, option_slots
+from inspect_robots.conformance import (
+    DeviceSlot,
+    NumberSlot,
+    OptionSlot,
+    device_slots,
+    number_slots,
+    option_slots,
+)
 from inspect_robots.defaults import _parse_value, config_path
 
 # Same minimal-ANSI convention as cli.py (#37): plain when piped or NO_COLOR.
@@ -114,6 +122,10 @@ def _valid_max_steps(value: str) -> bool:
 
 def _valid_bool(value: str) -> bool:
     return isinstance(_parse_value(value), bool)
+
+
+def _valid_images_mode(value: str) -> bool:
+    return value in ("on_demand", "always")
 
 
 def _ask(
@@ -1004,6 +1016,71 @@ def _options_section(
     return answers
 
 
+def _acceptable_number(slot: NumberSlot, parsed: object) -> bool:
+    if parsed is None:
+        return slot.allow_none
+    if not isinstance(parsed, (float, int)) or isinstance(parsed, bool):
+        return False
+    if isinstance(parsed, float) and not math.isfinite(parsed):
+        return False
+    if slot.minimum is not None and parsed < slot.minimum:
+        return False
+    return slot.maximum is None or parsed <= slot.maximum
+
+
+def _number_validator(slot: NumberSlot) -> _Validator:
+    def validate(value: str) -> bool:
+        return _acceptable_number(slot, _parse_value(value))
+
+    return validate
+
+
+def _number_constraint(slot: NumberSlot) -> str:
+    constraint = f"{slot.arg} must be a finite number"
+    if slot.minimum is not None:
+        constraint += f" >= {slot.minimum}"
+    if slot.maximum is not None:
+        conjunction = " and" if slot.minimum is not None else ""
+        constraint += f"{conjunction} <= {slot.maximum}"
+    if slot.allow_none:
+        constraint += ", or none"
+    return constraint
+
+
+def _numbers_section(
+    numbers: tuple[NumberSlot, ...],
+    carried: dict[str, dict[str, str]],
+    *,
+    input_fn: Callable[[str], str],
+    out: IO[str],
+) -> dict[str, str]:
+    """Interview plugin-declared finite numeric settings within their bounds.
+
+    A valid carried value supplies the suggestion; otherwise the declared
+    default is used silently. Accepted input is preserved verbatim, while
+    Enter writes the displayed default and ``None`` is canonicalized to
+    ``none``.
+    """
+    existing_args = carried.get("embodiment.args", {})
+    answers: dict[str, str] = {}
+    for slot in numbers:
+        suggested = slot.default
+        if slot.arg in existing_args:
+            parsed = _parse_value(existing_args[slot.arg])
+            if _acceptable_number(slot, parsed):
+                suggested = parsed
+        display = "none" if suggested is None else str(suggested)
+        answers[slot.arg] = _ask(
+            slot.label,
+            display,
+            _number_validator(slot),
+            _number_constraint(slot),
+            input_fn=input_fn,
+            out=out,
+        )
+    return answers
+
+
 def _v4l2_color_capture(path: Path) -> bool | None:
     """Return whether a node captures color, or ``None`` when probing is inconclusive."""
     try:
@@ -1406,8 +1483,12 @@ def _render_config(
     embodiment_args: dict[str, str],
     carried: dict[str, dict[str, str]],
     managed_args: tuple[str, ...] = CAMERA_KEYS,
+    policy_args: dict[str, str] | None = None,
+    managed_policy_args: tuple[str, ...] = (),
 ) -> str:
     """Render a full commented config while carrying unmanaged raw values."""
+    if policy_args is None:
+        policy_args = {}
     sections: list[str] = []
 
     default_lines: list[str] = []
@@ -1442,8 +1523,20 @@ def _render_config(
     if embodiment_lines:
         sections.append("[embodiment.args]\n" + "\n".join(embodiment_lines))
 
+    policy_lines: list[str] = []
+    for key in managed_policy_args:
+        if key in policy_args:
+            value = policy_args[key].replace("\n", "\n\t")
+            policy_lines.append(f"{key} = {value}")
+    for key, value in carried.get("policy.args", {}).items():
+        if key not in managed_policy_args:
+            value = value.replace("\n", "\n\t")
+            policy_lines.append(f"{key} = {value}")
+    if policy_lines:
+        sections.append("[policy.args]\n" + "\n".join(policy_lines))
+
     for section, values in carried.items():
-        if section in ("defaults", "embodiment.args"):
+        if section in ("defaults", "embodiment.args", "policy.args"):
             continue
         if values:
             lines = []
@@ -1520,6 +1613,37 @@ def run_setup(
             input_fn=input_fn,
             out=out,
         )
+        configured_policy = defaults["policy"]
+        policy_args: dict[str, str] = {}
+        managed_policy_args: tuple[str, ...] = ()
+        if configured_policy == "agent":
+            managed_policy_args = ("images",)
+            existing_policy_args = carried.get("policy.args", {})
+            default_images = "on_demand"
+            if "images" in existing_policy_args:
+                configured_images = existing_policy_args["images"]
+                if _valid_images_mode(configured_images):
+                    default_images = configured_images
+            print(
+                _paint(
+                    "agent camera mode: 'on_demand' lets the model call take_pic when "
+                    "it needs a frame (cuts tokens, but model must remember to look); "
+                    "'always' attaches frames to every step",
+                    _DIM,
+                    out,
+                ),
+                file=out,
+            )
+            images_value = _ask(
+                "agent camera mode",
+                default_images,
+                _valid_images_mode,
+                "camera mode must be 'on_demand' or 'always'",
+                input_fn=input_fn,
+                out=out,
+            )
+            policy_args["images"] = images_value
+
         from inspect_robots.registry import registered
 
         embodiment_factories = registered("embodiment")
@@ -1531,6 +1655,11 @@ def run_setup(
         )
         options = (
             option_slots(embodiment_factories[configured_embodiment])
+            if configured_embodiment in embodiment_factories
+            else ()
+        )
+        numbers = (
+            number_slots(embodiment_factories[configured_embodiment])
             if configured_embodiment in embodiment_factories
             else ()
         )
@@ -1575,11 +1704,32 @@ def run_setup(
             embodiment_args.update(
                 _options_section(tuple(interviewed), carried, input_fn=input_fn, out=out)
             )
+        # Number args share the option collision set and are interviewed last.
+        # Extending managed_args makes the answer authoritative in _render_config:
+        # the managed loop writes it and the carried-key loop drops any stale line.
+        interviewed_numbers: list[NumberSlot] = []
+        for number in numbers:
+            if number.arg in taken:
+                continue
+            taken.add(number.arg)
+            interviewed_numbers.append(number)
+        if interviewed_numbers:
+            managed_args = managed_args + tuple(number.arg for number in interviewed_numbers)
+            embodiment_args.update(
+                _numbers_section(tuple(interviewed_numbers), carried, input_fn=input_fn, out=out)
+            )
     except (EOFError, KeyboardInterrupt):
         print(_paint("setup aborted; nothing written", _YELLOW, out), file=out)
         return 1
 
-    text = _render_config(defaults, embodiment_args, carried, managed_args)
+    text = _render_config(
+        defaults,
+        embodiment_args,
+        carried,
+        managed_args,
+        policy_args=policy_args,
+        managed_policy_args=managed_policy_args,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
