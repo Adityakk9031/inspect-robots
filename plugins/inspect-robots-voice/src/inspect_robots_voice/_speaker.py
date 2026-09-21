@@ -70,6 +70,16 @@ class _SoundDevicePlayback:
             self._sample_rate = sample_rate
         self._stream.write(samples)
 
+    def drain(self) -> None:
+        stream = self._stream
+        if stream is None:
+            return
+        latency = getattr(stream, "latency", None)
+        if isinstance(latency, tuple):
+            latency = latency[1] if len(latency) > 1 else latency[0]
+        if isinstance(latency, (int, float)) and latency > 0:
+            time.sleep(latency)
+
     def close(self) -> None:
         stream = self._stream
         self._stream = None
@@ -318,6 +328,29 @@ class SpeakerSink(NullSink):
                         if self._speech_gen != gen:
                             break
                         playback.write(gained[start : start + chunk_size], sample_rate)
+                    if not self._stop.is_set() and self._speech_gen == gen:
+                        drain = getattr(playback, "drain", None)
+                        if callable(drain):
+                            drain()
+                        elif hasattr(playback, "wait_done") and callable(playback.wait_done):
+                            playback.wait_done()
+                        elif hasattr(playback, "wait") and callable(playback.wait):
+                            playback.wait()
+                        is_playing = getattr(playback, "is_playing", None) or getattr(
+                            playback, "is_active", None
+                        )
+                        if callable(is_playing):
+                            while (
+                                is_playing() and not self._stop.is_set() and self._speech_gen == gen
+                            ):
+                                time.sleep(0.01)
+                        elif getattr(playback, "active", False):
+                            while (
+                                getattr(playback, "active", False)
+                                and not self._stop.is_set()
+                                and self._speech_gen == gen
+                            ):
+                                time.sleep(0.01)
                 finally:
                     _unregister_speaker(self)
             except Exception as exc:

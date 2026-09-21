@@ -780,3 +780,42 @@ def test_speaker_active_playback_registration() -> None:
     # The speaker should be discarded from _active_speakers when done
     with _speakers_lock:
         assert sink not in _active_speakers
+
+
+def test_speaker_buffered_playback_holds_mute_until_drained() -> None:
+    from inspect_robots_voice._capture import (
+        _active_speakers,
+        _is_playback_active,
+        _speakers_lock,
+    )
+
+    class _BufferedPlayback(_FakePlayback):
+        def __init__(self, buffer_s: float = 0.15) -> None:
+            super().__init__()
+            self.buffer_s = buffer_s
+            self.play_until = 0.0
+
+        def write(self, samples: npt.NDArray[np.float32], sample_rate: int) -> None:
+            super().write(samples, sample_rate)
+            self.play_until = time.monotonic() + self.buffer_s
+
+        def drain(self) -> None:
+            remaining = self.play_until - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+
+    engine = _FakeEngine()
+    playback = _BufferedPlayback(buffer_s=0.15)
+    sink = _sink(engine, playback)
+    sink.start()
+
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "buffered"}))])
+
+    _wait_until(lambda: len(playback.writes) == 3)
+    assert _is_playback_active()
+
+    _wait_until(lambda: not _is_playback_active(), timeout=2.0)
+    sink.close()
