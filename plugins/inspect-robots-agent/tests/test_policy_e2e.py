@@ -2828,7 +2828,9 @@ def test_non_string_params_rejected(param: str, val: Any) -> None:
     assert expected_fix in str(exc_info.value)
 
 
-def test_bind_task_adds_step_budget_to_prompt_and_observation(capsys: pytest.CaptureFixture[str]) -> None:
+def test_bind_task_adds_step_budget_to_prompt_and_observation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from inspect_robots.task import TaskEnvelope
 
     policy = _policy(_Script([_tool_response("done", {"summary": "done"})]), transcript_echo=True)
