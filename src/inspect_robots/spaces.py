@@ -95,10 +95,13 @@ class Box:
 
     def __post_init__(self) -> None:
         for name, bound in (("low", self.low), ("high", self.high)):
-            if bound is not None and tuple(bound.shape) != self.shape:
-                raise ValueError(
-                    f"Box {name} shape {tuple(bound.shape)} != space shape {self.shape}"
-                )
+            if bound is not None:
+                if tuple(bound.shape) != self.shape:
+                    raise ValueError(
+                        f"Box {name} shape {tuple(bound.shape)} != space shape {self.shape}"
+                    )
+                if bool(np.isnan(bound).any()):
+                    raise ValueError(f"Box {name} bound contains NaN")
         if self.low is not None and self.high is not None and bool(np.any(self.low > self.high)):
             raise ValueError("Box low must be elementwise <= high")
         labels = self.semantics.dim_labels if self.semantics is not None else None

@@ -80,6 +80,13 @@ def test_box_rejects_inverted_bounds() -> None:
         Box(shape=(2,), low=np.array([0.0, 1.0]), high=np.array([1.0, 0.5]))
 
 
+def test_box_rejects_nan_bounds() -> None:
+    with pytest.raises(ValueError, match="Box low bound contains NaN"):
+        Box(shape=(2,), low=np.array([np.nan, -1.0]), high=np.array([1.0, 1.0]))
+    with pytest.raises(ValueError, match="Box high bound contains NaN"):
+        Box(shape=(2,), low=np.array([-1.0, -1.0]), high=np.array([1.0, np.nan]))
+
+
 def test_action_semantics_defaults() -> None:
     sem = ActionSemantics(control_mode="eef_delta_pose")
     assert sem.rotation_repr == "none"
