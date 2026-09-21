@@ -1045,6 +1045,16 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert logs[0].results.metrics["operator"] == 1.0
 
 
+def test_eval_set_rejects_empty_task_list(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=r"eval_set\(\) requires at least one task"):
+        eval_set(
+            [],
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+
 def test_eval_observes_parked_once_before_grading(tmp_path: Path) -> None:
     parked = Observation(images={"parked": np.zeros((2, 2, 3), dtype=np.uint8)})
     embodiment = _ParkedEmbodiment(parked)
