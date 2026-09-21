@@ -10,6 +10,7 @@ slice accepts already-constructed objects; registry-string resolution
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import time
@@ -259,6 +260,9 @@ def eval(
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -329,6 +333,15 @@ def eval(
     rollout) if the policy and embodiment are incompatible, and
     [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer.
     """
+    if not isinstance(fail_on_error, bool) and not (
+        isinstance(fail_on_error, (int, float))
+        and math.isfinite(fail_on_error)
+        and fail_on_error >= 0
+    ):
+        raise ConfigError(
+            f"fail_on_error must be a boolean or finite float >= 0, got {fail_on_error!r}"
+        )
+
     from inspect_robots.registry import resolve
 
     before_scoring = _grading_hook(grader, before_scoring)
@@ -356,6 +369,9 @@ def eval(
             store_actions=store_actions,
             operator_input=operator_input,
             before_scoring=before_scoring,
+            environment_id=environment_id,
+            environment_revision=environment_revision,
+            policy_checkpoint=policy_checkpoint,
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -380,6 +396,9 @@ def _run_eval(
     store_actions: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -451,6 +470,10 @@ def _run_eval(
         seed=seed,
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
+        environment_id=environment_id or getattr(embodiment.info, "environment_id", None),
+        environment_revision=environment_revision
+        or getattr(embodiment.info, "environment_revision", None),
+        policy_checkpoint=policy_checkpoint or getattr(policy.info, "checkpoint", None),
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
@@ -885,6 +908,8 @@ def eval_set(
     """
     before_scoring = _grading_hook(grader, before_scoring)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
+    if not task_list:
+        raise ConfigError("eval_set() requires at least one task; got an empty sequence")
     logs: list[EvalLog] = []
     for task in task_list:
         try:

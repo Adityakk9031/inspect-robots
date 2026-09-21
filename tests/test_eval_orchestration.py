@@ -661,6 +661,21 @@ def test_fail_on_error_true_stops_at_first_error(tmp_path: Path) -> None:
     assert log.results.total_trials == 1  # stopped immediately, not after 3 epochs
 
 
+@pytest.mark.parametrize(
+    "invalid_foe", [-1, -0.5, float("nan"), float("inf"), float("-inf"), "invalid"]
+)
+def test_eval_rejects_invalid_fail_on_error(tmp_path: Path, invalid_foe: object) -> None:
+    task = _task(epochs=1)
+    with pytest.raises(ConfigError, match="fail_on_error must be a boolean or finite float >= 0"):
+        eval(
+            task,
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            fail_on_error=invalid_foe,  # type: ignore[arg-type]
+        )
+
+
 # --------------------------------------------------------------------------- #
 # 5. Embodiment lifecycle: eval closes what it resolves, and only that.
 # --------------------------------------------------------------------------- #
@@ -1143,6 +1158,16 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert success
     assert logs[0].samples[0].operator_judgements == ("pass",)
     assert logs[0].results.metrics["operator"] == 1.0
+
+
+def test_eval_set_rejects_empty_task_list(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=r"eval_set\(\) requires at least one task"):
+        eval_set(
+            [],
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
 
 
 def test_eval_observes_parked_once_before_grading(tmp_path: Path) -> None:
