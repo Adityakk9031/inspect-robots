@@ -866,6 +866,8 @@ def eval_set(
     """
     before_scoring = _grading_hook(grader, before_scoring)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
+    if not task_list:
+        raise ConfigError("eval_set() requires at least one task; got an empty sequence")
     logs: list[EvalLog] = []
     for task in task_list:
         try:
