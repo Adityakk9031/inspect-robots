@@ -1,8 +1,8 @@
-"""Strict RFC 8259 JSON logs and the ClampApprover NaN gate, end to end.
+"""Strict RFC 8259 JSON logs and rollout non-finite gates, end to end.
 
 The written eval log must be parseable by any conforming JSON parser: no
-``Infinity``/``NaN`` literals (non-finite floats become ``null``). A NaN action
-caught by the ClampApprover halts the eval as ``SafetyAbort`` — and the log
+``Infinity``/``NaN`` literals (non-finite floats become ``null``). A non-finite
+action introduced by an approver halts the eval as ``SafetyAbort``, and the log
 still reaches disk.
 """
 
@@ -16,14 +16,13 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval, read_eval_log
-from inspect_robots.approver import ClampApprover
 from inspect_robots.logging.json_log import _sanitize
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import min_distance_to_goal, success_at_end
 from inspect_robots.task import Task
-from inspect_robots.types import Action, ActionChunk, Observation, StepResult
+from inspect_robots.types import Action, StepResult
 
 
 def _task(scorer: object = None) -> Task:
@@ -54,12 +53,12 @@ class _NoDistanceEmbodiment(CubePickEmbodiment):
         return replace(result, info={"success": result.info.get("success", False)})
 
 
-class _NaNPolicy(ScriptedPolicy):
-    """Emits a NaN action on the first inference."""
+class _NaNApprover:
+    """Replace a finite policy action with a NaN action."""
 
-    def act(self, observation: Observation) -> ActionChunk:
-        chunk = super().act(observation)
-        return ActionChunk(actions=[Action(data=np.full(2, np.nan)), *chunk.actions])
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        del store
+        return replace(action, data=np.full(2, np.nan))
 
 
 def test_sanitize_maps_non_finite_floats_to_none() -> None:
@@ -67,20 +66,30 @@ def test_sanitize_maps_non_finite_floats_to_none() -> None:
         "inf": float("inf"),
         "ninf": float("-inf"),
         "nan": float("nan"),
+        "np_nan32": np.float32(np.nan),
+        "np_inf32": np.float32(np.inf),
+        "np_ninf32": np.float32(-np.inf),
+        "np_nan16": np.float16(np.nan),
+        "np_fine32": np.float32(2.5),
         "fine": 1.5,
         "int": 3,
         "flag": True,
-        "nested": [float("inf"), {"d": float("nan")}, (2.0, float("-inf"))],
+        "nested": [float("inf"), {"d": float("nan")}, (2.0, float("-inf"), np.float32(np.nan))],
     }
     clean = _sanitize(dirty)
     assert clean == {
         "inf": None,
         "ninf": None,
         "nan": None,
+        "np_nan32": None,
+        "np_inf32": None,
+        "np_ninf32": None,
+        "np_nan16": None,
+        "np_fine32": 2.5,
         "fine": 1.5,
         "int": 3,
         "flag": True,
-        "nested": [None, {"d": None}, [2.0, None]],
+        "nested": [None, {"d": None}, [2.0, None, None]],
     }
 
 
@@ -102,10 +111,11 @@ def test_inf_metric_written_as_null(tmp_path: Path) -> None:
 
 def test_nan_action_halts_as_safety_abort_and_log_reaches_disk(tmp_path: Path) -> None:
     embodiment = CubePickEmbodiment()
-    approver = ClampApprover(embodiment.info.action_space)
-    (log,) = eval(_task(), _NaNPolicy(), embodiment, approver=approver, log_dir=str(tmp_path))
+    approver = _NaNApprover()
+    (log,) = eval(_task(), ScriptedPolicy(), embodiment, approver=approver, log_dir=str(tmp_path))
     assert log.status == "error"
-    assert log.error is not None and "NaN" in log.error
+    assert log.error is not None and "non-finite" in log.error
+    assert "_NaNApprover" in log.error
 
     (path,) = tmp_path.glob("*.json")
     restored = read_eval_log(str(path))
@@ -196,3 +206,26 @@ def test_policy_transcript_non_finite_floats_write_as_null(tmp_path: Path) -> No
     assert isinstance(samples, list)
     transcript = samples[0]["policy_transcripts"][0]
     assert transcript == {"inf": None, "nan": None}
+
+
+def test_numpy_float_non_finite_writes_as_null(tmp_path: Path) -> None:
+    def hook(record: TrialRecord, scene: Scene) -> None:
+        record.metadata["np_nan32"] = np.float32(np.nan)
+        record.metadata["np_inf32"] = np.float32(np.inf)
+        record.metadata["np_fine32"] = np.float32(3.14)
+
+    eval(
+        _task(),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        before_scoring=hook,
+    )
+    (path,) = tmp_path.glob("*.json")
+    data = _read_strict(path)
+    samples = data["samples"]
+    assert isinstance(samples, list)
+    meta = samples[0]["trial_metadata"][0]
+    assert meta["np_nan32"] is None
+    assert meta["np_inf32"] is None
+    assert meta["np_fine32"] == pytest.approx(3.14, rel=1e-3)

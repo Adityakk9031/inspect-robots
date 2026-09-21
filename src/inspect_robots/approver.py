@@ -47,9 +47,9 @@ class GuardrailContribution:
     such as holding an earlier pose, it must call
     ``DeltaLimitApprover.rewind_reference`` with that executed pose so later
     deltas are measured from reality. It vetoes by raising ``SafetyAbort``;
-    other exceptions are bugs and propagate. It must validate its own input,
-    rejecting non-finite values with ``SafetyAbort`` rather than assuming an
-    upstream clamp exists, because it may be the only active gate.
+    other exceptions are bugs and propagate. The rollout enforces finiteness
+    before review and again on the returned action, so contributed approvers
+    need not duplicate that validation.
     """
 
     approvers: tuple[tuple[str, Approver], ...] = ()
@@ -115,12 +115,13 @@ class ClampApprover:
     when nothing clamps, the *same* action object is returned (the rollout
     detects modification by identity).
 
-    Non-finite values are the safety cases: ``NaN`` anywhere in the action
-    raises [`SafetyAbort`][inspect_robots.errors.SafetyAbort] — a NaN is a
-    poisonous value with no meaningful clamp, and it must never reach hardware.
-    ``±inf`` is *not* an abort: it clamps to the finite bound on that side like
-    any other out-of-range value (and passes through if that side is
-    unbounded).
+    Non-finite values are the safety cases for direct ``review()`` callers,
+    since rollout rejects non-finite policy actions before review: ``NaN``
+    anywhere in the action raises
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. A NaN is a poisonous
+    value with no meaningful clamp, and it must never reach hardware. ``±inf``
+    is *not* an abort: it clamps to the finite bound on that side like any other
+    out-of-range value (and passes through if that side is unbounded).
     """
 
     def __init__(self, action_space: Box):
@@ -313,12 +314,16 @@ class DeltaLimitApprover:
 def _validate_max_delta(
     max_delta: float | Any, shape: tuple[int, ...], dim: int
 ) -> npt.NDArray[np.float64]:
+    raw = np.asarray(max_delta, dtype=np.float64)
     try:
-        arr = np.broadcast_to(np.asarray(max_delta, dtype=np.float64), (dim,))
-    except ValueError as exc:
-        raise ValueError(
-            f"DeltaLimitApprover: max_delta does not broadcast to {dim} dimensions"
-        ) from exc
+        arr = np.broadcast_to(raw, shape)
+    except ValueError:
+        try:
+            arr = np.broadcast_to(raw, (dim,)).reshape(shape)
+        except ValueError as exc:
+            raise ValueError(
+                f"DeltaLimitApprover: max_delta does not broadcast to {shape} (or {dim} dimensions)"
+            ) from exc
     if not bool(np.all(np.isfinite(arr))) or bool(np.any(arr <= 0)):
         raise ValueError("DeltaLimitApprover: max_delta must be finite and > 0")
     # Shaped like the box for the same reason the derived default is: review()

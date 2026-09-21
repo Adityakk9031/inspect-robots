@@ -91,6 +91,9 @@ class TrialRecord:
     epoch: int
     seed: int | None
     steps: list[StepRecord] = field(default_factory=list)
+    # In-memory only: EvalLog embeds SceneResult aggregates and never TrialRecord,
+    # so no asdict path reaches the numpy images and the log schema is untouched.
+    parked_observation: Observation | None = None
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None
@@ -203,6 +206,19 @@ def _policy_error(policy: Policy, exc: Exception) -> PolicyError:
     return PolicyError(message)
 
 
+def _non_finite_detail(data: object) -> str | None:
+    """Describe why action data is not finite, or return ``None`` when it is."""
+    try:
+        array = np.asarray(data, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return f"is not numeric: {exc}"
+    if np.isfinite(array).all():
+        return None
+    if np.isnan(array).any():
+        return "contains nan"
+    return "contains inf"
+
+
 def _store_frames(
     frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation
 ) -> tuple[Observation, Mapping[str, FrameRef] | None]:
@@ -276,11 +292,13 @@ def rollout(
 ) -> TrialRecord:
     """Run a single trial and return its record.
 
-    Generic exceptions raised by the policy are wrapped as
-    [`PolicyError`][inspect_robots.errors.PolicyError]; by the embodiment as
+    Generic exceptions raised by the policy, or a non-finite action, are
+    reported as [`PolicyError`][inspect_robots.errors.PolicyError]; generic
+    exceptions raised by the embodiment are reported as
     [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault]; by the approver as
     [`SafetyAbort`][inspect_robots.errors.SafetyAbort] (an approver that crashed cannot
-    vouch for safety). Already-typed Inspect Robots errors (incl.
+    vouch for safety), as is a non-finite action introduced by the approver.
+    Already-typed Inspect Robots errors (incl.
     [`SafetyAbort`][inspect_robots.errors.SafetyAbort]) propagate unchanged, so the
     eval orchestrator can apply the correct continue-vs-halt policy. Every error
     raised from inside the trial carries the partial ``TrialRecord`` on
@@ -292,6 +310,8 @@ def rollout(
     declares the ``"self_paced"`` capability to document that it does (see
     [`Embodiment`][inspect_robots.embodiment.Embodiment]).
     """
+    if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps < 1:
+        raise ValueError(f"max_steps must be an integer >= 1, got {max_steps!r}")
     trial_id = f"{scene.id}-e{epoch}"
     record = TrialRecord(scene_id=scene.id, epoch=epoch, seed=seed)
     record.events.append(reset_event(seed))
@@ -438,6 +458,16 @@ def rollout(
                     ),
                     t,
                 )
+            non_finite_detail = _non_finite_detail(action.data)
+            if non_finite_detail is not None:
+                raise _record_failure(
+                    record,
+                    PolicyError(
+                        "policy emitted a non-finite action "
+                        f"({non_finite_detail}) for embodiment {embodiment.info.name!r}"
+                    ),
+                    t,
+                )
 
             # Policy-requested stop (plan 0008 §3d), captured from the
             # PRE-review action so an approver rewrite cannot erase the
@@ -460,6 +490,18 @@ def rollout(
                 record.events.append(approval_event(t, modified=True, detail=detail))
                 store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
+
+            # Recheck because an approver may mutate the array in place and return it.
+            non_finite_detail = _non_finite_detail(action.data)
+            if non_finite_detail is not None:
+                raise _record_failure(
+                    record,
+                    SafetyAbort(
+                        f"approver {type(approver).__name__} returned a non-finite "
+                        f"action ({non_finite_detail})"
+                    ),
+                    t,
+                )
 
             try:
                 result: StepResult = embodiment.step(action)

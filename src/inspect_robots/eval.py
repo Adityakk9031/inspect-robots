@@ -10,6 +10,7 @@ slice accepts already-constructed objects; registry-string resolution
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import time
@@ -38,12 +39,20 @@ from inspect_robots.errors import (
 )
 from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
-from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
+from inspect_robots.log import (
+    EvalLog,
+    EvalResults,
+    EvalSpec,
+    EvalStats,
+    SceneResult,
+    _json_safe_scene_metadata,
+)
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
 from inspect_robots.task import Task
+from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
     from inspect_robots.console import OperatorInput
@@ -55,16 +64,20 @@ if TYPE_CHECKING:
 def _grading_hook(
     grader: Grader | str | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
-) -> Callable[[TrialRecord, Scene], None] | None:
-    """Resolve ``grader``/``before_scoring`` into the single pre-scoring hook.
+) -> tuple[Callable[[TrialRecord, Scene], None] | None, Grader | None]:
+    """Resolve ``grader``/``before_scoring`` into the pre-scoring hook and its grader.
 
     The two arguments write to the same seam, so passing both is always a
     caller bug and raises ``ConfigError``. A string resolves through the
     registry, and the result must satisfy the ``Grader`` protocol — a broken
     entry point fails here, at configuration time, not deep inside scoring.
+
+    The resolved grader comes back alongside the hook so the caller can record
+    what graded the run; a bare ``before_scoring`` callable has no identity to
+    record and yields ``None``.
     """
     if grader is None:
-        return before_scoring
+        return before_scoring, None
     if before_scoring is not None:
         raise ConfigError("pass either grader or before_scoring, not both")
     if isinstance(grader, str):
@@ -76,7 +89,24 @@ def _grading_hook(
             f"grader must implement the Grader protocol (a name and a "
             f"grade(record, scene) method); got {type(grader).__name__}"
         )
-    return grader.grade
+    return grader.grade, grader
+
+
+def _grader_identity(grader: Grader | None) -> tuple[str | None, dict[str, Any]]:
+    """Return the grader's registry name and effective config for the eval spec.
+
+    ``config()`` is an optional duck-typed hook, like the embodiment's
+    ``bind_task``, deliberately not part of the ``Grader`` Protocol: adding it
+    there would make every existing out-of-tree grader fail the protocol's
+    ``isinstance`` check. A grader without one is still named in the log and
+    simply records no configuration.
+    """
+    if grader is None:
+        return None, {}
+    hook = getattr(grader, "config", None)
+    if not callable(hook):
+        return grader.name, {}
+    return grader.name, cast("dict[str, Any]", dict(hook()))
 
 
 def _now_iso() -> str:
@@ -204,6 +234,13 @@ class _Broadcast:
             if callable(hook):
                 hook(frames_dir)
 
+    def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+        """Offer the run's scenes to sinks that declare the optional hook."""
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_scenes", None)
+            if callable(hook):
+                hook(scenes)
+
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
             s.on_eval_start(spec)
@@ -245,6 +282,9 @@ def eval(
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
     perturber: Perturber | None = None,
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -288,6 +328,13 @@ def eval(
 
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
 
+    Before a grader runs, an embodiment's optional duck-typed
+    ``observe_parked()`` hook may move the robot to its parked/rest pose so the
+    cameras see the scene unobstructed and return one fresh ``Observation``.
+    Returning ``None`` declines. Other failures degrade with a
+    ``RuntimeWarning`` and grading uses the last-step frames, except
+    ``SafetyAbort`` and ``EmbodimentFault``, which halt the eval.
+
     ``before_scoring`` is called exactly once per trial that will be scored
     (never for errored or cancelled trials, which are recorded but not
     scored), after the rollout returns and before the scorers run. It may
@@ -308,9 +355,18 @@ def eval(
     rollout) if the policy and embodiment are incompatible, and
     [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer.
     """
+    if not isinstance(fail_on_error, bool) and not (
+        isinstance(fail_on_error, (int, float))
+        and math.isfinite(fail_on_error)
+        and fail_on_error >= 0
+    ):
+        raise ConfigError(
+            f"fail_on_error must be a boolean or finite float >= 0, got {fail_on_error!r}"
+        )
+
     from inspect_robots.registry import resolve
 
-    before_scoring = _grading_hook(grader, before_scoring)
+    before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
     owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
@@ -336,6 +392,10 @@ def eval(
             operator_input=operator_input,
             before_scoring=before_scoring,
             perturber=perturber,
+            grader_identity=_grader_identity(resolved_grader),
+            environment_id=environment_id,
+            environment_revision=environment_revision,
+            policy_checkpoint=policy_checkpoint,
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -361,9 +421,15 @@ def _run_eval(
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
     perturber: Perturber | None = None,
+    grader_identity: tuple[str | None, dict[str, Any]],
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
+    from inspect_robots.session import _DEFINITIVE_REASONS
+    from inspect_robots.types import Observation
 
     # Embodiment-adaptive policies (plan 0008 §3c): an optional bind() hook
     # runs before the compatibility check so the policy can adopt the
@@ -414,6 +480,7 @@ def _run_eval(
     if store_frames:
         frame_store = FrameStore(str(Path(log_dir) / "frames" / run_stamp))
 
+    grader_name, grader_config = grader_identity
     spec = EvalSpec(
         task=task.name,
         policy=policy.info.name,
@@ -427,12 +494,19 @@ def _run_eval(
             "is_simulated": embodiment.info.is_simulated,
             "capabilities": sorted(embodiment.info.capabilities),
         },
+        grader=grader_name,
+        grader_config=grader_config,
         seed=seed,
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
+        environment_id=environment_id or getattr(embodiment.info, "environment_id", None),
+        environment_revision=environment_revision
+        or getattr(embodiment.info, "environment_revision", None),
+        policy_checkpoint=policy_checkpoint or getattr(policy.info, "checkpoint", None),
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
+    bus.bind_scenes(task.scenes)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()
@@ -458,11 +532,13 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        judgement_sources: list[str | None] = []
         notes: list[str | None] = []
         trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
         operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
+        scene_metadata = _json_safe_scene_metadata(scene.metadata)
         scene_status = "success"
         scene_error: str | None = None
 
@@ -544,24 +620,73 @@ def _run_eval(
                     if record.status == "error":
                         errored_trials += 1
                     judgements.append(None)
+                    judgement_sources.append(None)
                     notes.append(None)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
                         # will read — an operator verdict on a crashed trial
                         # would be dead data (errored trials are never scored).
+                        if record.operator_judgement is None and not (
+                            record.terminated and record.termination_reason in _DEFINITIVE_REASONS
+                        ):
+                            observe_parked = getattr(embodiment, "observe_parked", None)
+                            if callable(observe_parked):
+                                try:
+                                    parked_observation = observe_parked()
+                                except (SafetyAbort, EmbodimentFault):
+                                    raise
+                                except Exception as exc:
+                                    warnings.warn(
+                                        "embodiment.observe_parked() failed with "
+                                        f"{type(exc).__name__}: {exc}; grading from "
+                                        "last-step frames",
+                                        RuntimeWarning,
+                                        stacklevel=2,
+                                    )
+                                else:
+                                    if isinstance(parked_observation, Observation):
+                                        record.parked_observation = parked_observation
+                                    elif parked_observation is not None:
+                                        warnings.warn(
+                                            "embodiment.observe_parked() returned "
+                                            f"{type(parked_observation).__name__}; expected "
+                                            "Observation or None; grading from last-step frames",
+                                            RuntimeWarning,
+                                            stacklevel=2,
+                                        )
                         before_scoring(record, scene)
                     epoch_values: dict[str, float] = {}
                     for scorer in scorers:
-                        score = scorer(record, scene.target)
+                        try:
+                            score = scorer(record, scene.target)
+                            value = value_to_float(score.value)
+                        except (SafetyAbort, EmbodimentFault):
+                            # Halt signals are not scoring errors: containing
+                            # them here would let the next rollout start after
+                            # an explicit safety abort or a hardware fault.
+                            raise
+                        except Exception as exc:
+                            # A scorer failure degrades to an error log - it must
+                            # never crash the eval and lose the trials that ran.
+                            detail = f"scorer {scorer.name!r} failed: {exc}"
+                            scene_status = "error"
+                            scene_error = (
+                                detail if scene_error is None else f"{scene_error}; {detail}"
+                            )
+                            if status == "success":
+                                status = "error"
+                                error = detail
+                            continue
                         per_scorer_scores[scorer.name].append(score)
-                        epoch_values[scorer.name] = value_to_float(score.value)
+                        epoch_values[scorer.name] = value
                     epoch_dicts.append(epoch_values)
                     # Captured at the same instant as the judgement, on purpose:
-                    # the two are documented as strictly parallel, so a later
+                    # these fields are documented as strictly parallel, so a later
                     # mutation (e.g. from policy.on_trial_end) must not be able
-                    # to reach one of them and miss the other.
+                    # to reach one of them and miss the others.
                     judgements.append(record.operator_judgement)
+                    judgement_sources.append(judgement_source(record))
                     notes.append(record.operator_note)
 
                 # A never-reset trial must not persist the previous trial's
@@ -647,7 +772,9 @@ def _run_eval(
                 epochs=tuple(epoch_dicts),
                 error=scene_error,
                 instruction=scene.instruction,
+                scene_metadata=scene_metadata,
                 operator_judgements=tuple(judgements),
+                judgement_sources=tuple(judgement_sources),
                 operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
@@ -714,6 +841,50 @@ def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:
     return errors >= fail_on_error
 
 
+def _component_name(component: Policy | Embodiment) -> str:
+    """Return a component's declared name without masking an earlier failure."""
+    try:
+        return component.info.name
+    except Exception:
+        return type(component).__name__
+
+
+def _error_log_for(
+    task: Task | str,
+    policy: Policy | str,
+    embodiment: Embodiment | str,
+    *,
+    seed: int | None,
+    exc: Exception,
+) -> EvalLog:
+    """Describe a task failure that occurred before or outside log production."""
+    now = _now_iso()
+    return EvalLog(
+        version=EvalLog.SCHEMA_VERSION,
+        status="error",
+        eval=EvalSpec(
+            task=task if isinstance(task, str) else task.name,
+            policy=policy if isinstance(policy, str) else _component_name(policy),
+            embodiment=(embodiment if isinstance(embodiment, str) else _component_name(embodiment)),
+            created=now,
+            inspect_robots_version=__version__,
+            git_commit=_git_commit(),
+            seed=seed,
+            max_steps=None if isinstance(task, str) else task.max_steps,
+            max_seconds=None if isinstance(task, str) else task.max_seconds,
+        ),
+        results=EvalResults(total_scenes=0, total_trials=0),
+        stats=EvalStats(
+            started_at=now,
+            completed_at=now,
+            duration_s=0.0,
+            total_steps=0,
+        ),
+        samples=(),
+        error=f"{type(exc).__name__}: {exc}",
+    )
+
+
 def eval_set(
     tasks: Task | str | Sequence[Task | str],
     policy: Policy | str,
@@ -735,7 +906,21 @@ def eval_set(
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
-    ``success`` is ``True`` iff every task's log has ``status == "success"``.
+    ``success`` is ``True`` iff every returned log has ``status == "success"``.
+    A task that raises before or without producing a log contributes one
+    ``status="error"`` log carrying the exception text, and the remaining
+    tasks still run. A ``SafetyAbort`` or ``EmbodimentFault`` that escapes
+    ``eval()`` (raised outside a trial) and ``KeyboardInterrupt`` still
+    propagate. A halt inside a trial ends that task with an error log and the
+    set continues to the next task.
+    ``CompatibilityError``, unknown policy or embodiment registry names, and
+    task-factory ``ConfigError`` are therefore reported once per affected
+    task. Only grading configuration errors raised before the task loop
+    propagate.
+
+    With a string embodiment, a non-safety exception from ``close()`` can
+    produce an error row even when that task's completed JSON log is already
+    on disk.
 
     ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 
@@ -751,27 +936,46 @@ def eval_set(
     a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
     now so callers don't get retrofitted, but is not yet honored.
     """
-    before_scoring = _grading_hook(grader, before_scoring)
+    before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
+    if not task_list:
+        raise ConfigError("eval_set() requires at least one task; got an empty sequence")
     logs: list[EvalLog] = []
     for task in task_list:
-        logs.extend(
-            eval(
-                task,
-                policy,
-                embodiment,
-                log_dir=log_dir,
-                sinks=sinks,
-                seed=seed,
-                fail_on_error=fail_on_error,
-                controller=controller,
-                approver=approver,
-                remap=remap,
-                store_frames=store_frames,
-                store_actions=store_actions,
-                operator_input=operator_input,
-                before_scoring=before_scoring,
+        try:
+            logs.extend(
+                eval(
+                    task,
+                    policy,
+                    embodiment,
+                    log_dir=log_dir,
+                    sinks=sinks,
+                    seed=seed,
+                    fail_on_error=fail_on_error,
+                    controller=controller,
+                    approver=approver,
+                    remap=remap,
+                    store_frames=store_frames,
+                    store_actions=store_actions,
+                    operator_input=operator_input,
+                    # Hand the grader itself down, not just its bound method:
+                    # each task builds its own EvalSpec and a bare callable
+                    # would leave every eval_set log with no grader recorded.
+                    grader=resolved_grader,
+                    before_scoring=None if resolved_grader is not None else before_scoring,
+                )
             )
-        )
+        except (SafetyAbort, EmbodimentFault):
+            raise
+        except Exception as exc:
+            logs.append(
+                _error_log_for(
+                    task,
+                    policy,
+                    embodiment,
+                    seed=seed,
+                    exc=exc,
+                )
+            )
     success = all(log.status == "success" for log in logs)
     return success, logs

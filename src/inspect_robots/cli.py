@@ -5,7 +5,9 @@ Subcommands:
 - ``inspect-robots list [tasks|policies|embodiments|scorers|sinks|operator_inputs]`` — show
   registered components (builtins + installed plugins).
 - ``inspect-robots run --task T --policy P --embodiment E`` — run an eval, resolving
-  components from the registry. Pass constructor args with ``-T/-P/-E k=v``;
+  components from the registry. ``--instruction`` runs an operator-written
+  ad-hoc task, while ``--auto-task`` and repeatable ``-A k=v`` generate one
+  from the initial camera frames. Pass constructor args with ``-T/-P/-E k=v``;
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
   written log's path is printed at the end.
 - ``inspect-robots eval-set TASK [TASK ...] --policy P --embodiment E`` — run several
@@ -110,6 +112,11 @@ def _styled(text: str, code: str) -> str:
     return f"\x1b[{code}m{text}\x1b[0m"
 
 
+def _format_metric(value: float | int | None) -> str:
+    """Format numeric metric value or return 'n/a' when None."""
+    return "n/a" if value is None else f"{value:.4g}"
+
+
 _BOLD = "1"
 _BOLD_BRIGHT_MAGENTA = "1;95"
 _DIM = "2"
@@ -205,6 +212,7 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     parser.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
     parser.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
+    parser.add_argument("-G", dest="grader_args", action="append", metavar="k=v")
     parser.add_argument(
         "--voice",
         action="store_true",
@@ -306,7 +314,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="run a single ad-hoc scene with this language instruction "
         "(instead of a registered --task)",
     )
+    p_run.add_argument(
+        "--auto-task",
+        action="store_true",
+        help="generate one ad-hoc task and grading rubric from the initial camera frames",
+    )
     p_run.add_argument("-T", dest="task_args", action="append", metavar="k=v")
+    p_run.add_argument(
+        "-A",
+        dest="auto_task_args",
+        action="append",
+        metavar="k=v",
+        help="pass an argument to automatic task generation (requires --auto-task)",
+    )
     _add_shared_eval_args(p_run)
     _add_config_arg(p_run)
     p_run.add_argument(
@@ -327,13 +347,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-steps",
         type=int,
         default=None,
-        help="horizon of an --instruction run (default: config or "
+        help="horizon of an --instruction or --auto-task run (default: config or "
         f"{_ADHOC_MAX_STEPS_FALLBACK}); invalid with --task",
     )
     p_run.add_argument(
         "--scorer",
         default=None,
-        help="scorer for an --instruction run (default: config or "
+        help="scorer for an --instruction or --auto-task run (default: config or "
         f"{_ADHOC_SCORER_FALLBACK!r}); invalid with --task",
     )
     p_run.add_argument(
@@ -710,6 +730,7 @@ def _resolve_or_exit(
             "task": "-T",
             "policy": "-P",
             "embodiment": "-E",
+            "grader": "-G",
             "sink": "-S",
             "operator_input": "-V",
         }.get(kind, "the CLI args flag")
@@ -721,9 +742,12 @@ def _resolve_or_exit(
 def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = False) -> Task:
     """Apply ``--epochs`` with a guided error instead of a raw traceback.
 
-    ``replace()`` reruns ``Task.__post_init__``, which rejects a count below 1
-    via ``ConfigError`` — the same validation-error class ``_resolve_or_exit``
-    already converts to ``SystemExit``.
+    Only the count is overridden: the task's declared epoch reducer (e.g.
+    ``Epochs(count=5, reducer="pass_at_2")``) is carried over, so the flag
+    never silently swaps a benchmark's ``pass_at_k``/``max`` for ``mean``.
+    ``Epochs.__post_init__`` rejects a count below 1 via ``ConfigError`` — the
+    same validation-error class ``_resolve_or_exit`` already converts to
+    ``SystemExit``.
 
     ``attribute_task`` names the offending task, which ``eval-set`` needs to
     say *which* of several tasks rejected the flag; ``run`` has only one.
@@ -733,7 +757,7 @@ def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = Fal
     from inspect_robots.errors import ConfigError
 
     try:
-        return replace(task, epochs=epochs)
+        return replace(task, epochs=replace(task.epoch_spec, count=epochs))
     except ConfigError as exc:
         # `__post_init__` re-validates every field, but the task was already
         # valid and only `epochs` changed — so the epoch-count check is the
@@ -1000,8 +1024,12 @@ def _build_grader(
     """
     name = _select_grader_name(args, defaults)
     if name is None:
+        if args.grader_args:
+            raise SystemExit("-G requires a grader (--grader or a config default)")
         return None
-    grader = cast("Grader", _resolve_or_exit("grader", name))
+    config_kvs = _config_args("grader", name, defaults.grader_args_owner, defaults.grader_args)
+    grader_kvs = {**config_kvs, **_parse_kvs(args.grader_args)}
+    grader = cast("Grader", _resolve_or_exit("grader", name, **grader_kvs))
     connect = getattr(grader, "connect_session", None)
     if session is not None and callable(connect):
         connect(session)
@@ -1354,7 +1382,7 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
         trials += f" ({errored_count} errored)"
     print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+        print(f"  {name}: {_styled(_format_metric(value), _BOLD)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
     # Every run ends with the copy-pasteable read-back command (issue #90):
     # a bare path teaches a first-time user nothing about what to do next.
@@ -1570,19 +1598,31 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from inspect_robots.scene import Scene
     from inspect_robots.task import Task
 
-    is_adhoc = args.instruction is not None
-    if is_adhoc and args.task:
-        raise SystemExit("pass exactly one of --task or --instruction, not both")
-    if not is_adhoc and not args.task:
-        raise SystemExit("pass a registered --task name or an --instruction to run")
+    is_auto = args.auto_task
+    is_adhoc = args.instruction is not None or is_auto
+    if args.auto_task_args and not is_auto:
+        raise SystemExit("-A requires --auto-task")
+    if is_auto and args.task_args:
+        raise SystemExit("-T only applies to --task runs and cannot be used with --auto-task")
+    selected_modes = sum((args.task is not None, args.instruction is not None, is_auto))
+    if selected_modes > 1:
+        raise SystemExit(
+            "pass exactly one of --task, --instruction, or --auto-task, not both or all three"
+        )
+    if selected_modes == 0:
+        raise SystemExit(
+            "pass a registered --task name or an --instruction, or use --auto-task, to run"
+        )
     if not is_adhoc:
         if args.max_steps is not None:
             raise SystemExit(
-                "--max-steps only applies to --instruction runs; a registered task owns its horizon"
+                "--max-steps only applies to --instruction or --auto-task runs; "
+                "a registered task owns its horizon"
             )
         if args.scorer is not None:
             raise SystemExit(
-                "--scorer only applies to --instruction runs; a registered task owns its scorers"
+                "--scorer only applies to --instruction or --auto-task runs; "
+                "a registered task owns its scorers"
             )
     elif args.task_args:
         raise SystemExit(
@@ -1594,6 +1634,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     defaults = load_defaults(os.environ)
 
+    scorer_name: str | None = None
+    max_steps: int | None = None
     if is_adhoc:
         scorer_name = args.scorer or defaults.scorer or _ADHOC_SCORER_FALLBACK
         max_steps = (
@@ -1601,13 +1643,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
             if args.max_steps is not None
             else (defaults.max_steps or _ADHOC_MAX_STEPS_FALLBACK)
         )
-        task = Task(
-            name="adhoc",
-            scenes=[Scene(id="scene-0", instruction=args.instruction)],
-            scorer=_resolve_or_exit("scorer", scorer_name),
-            max_steps=max_steps,
-            metadata={"instruction": args.instruction, "adhoc": True},
-        )
+        scorer = _resolve_or_exit("scorer", scorer_name)
+        if is_auto:
+            task = None
+        else:
+            task = Task(
+                name="adhoc",
+                scenes=[Scene(id="scene-0", instruction=args.instruction)],
+                scorer=scorer,
+                max_steps=max_steps,
+                metadata={"instruction": args.instruction, "adhoc": True},
+            )
     else:
         task = _resolve_or_exit("task", args.task, **_parse_kvs(args.task_args))
 
@@ -1618,6 +1664,44 @@ def _cmd_run(args: argparse.Namespace) -> int:
     live_sink: LiveLogSink | None = None
     rerun_sink: LogSink | None = None
     try:
+        if is_auto:
+            import inspect_robots.taskgen
+            from inspect_robots.errors import ConfigError
+
+            # Config supplies generator defaults; explicit -A wins per key.
+            # A persisted [taskgen.args] seed collides with the explicit
+            # kwarg below and fails loudly: the seed knob is --seed.
+            taskgen_kvs = {**defaults.taskgen_args, **_parse_kvs(args.auto_task_args)}
+            try:
+                scene = inspect_robots.taskgen.generate_scene(
+                    resolved.embodiment,
+                    seed=args.seed,
+                    **taskgen_kvs,
+                )
+            except ConfigError as exc:
+                raise SystemExit(str(exc)) from exc
+            except TypeError as exc:
+                raise SystemExit(
+                    f"invalid arguments for automatic task generation: {exc}; "
+                    "check [taskgen.args] and -A k=v"
+                ) from exc
+            task = Task(
+                name="auto",
+                scenes=[scene],
+                scorer=scorer,
+                max_steps=cast(int, max_steps),
+                metadata={
+                    "adhoc": True,
+                    "auto_task": True,
+                    "instruction": scene.instruction,
+                },
+            )
+            print(f"auto task: {scene.instruction}")
+            print("rubric:")
+            rubric = cast(str, scene.metadata["rubric"])
+            for line in rubric.splitlines():
+                print(f"  {line}")
+        task = cast(Task, task)
         if args.epochs is not None:
             task = _apply_epochs_or_exit(task, args.epochs)
 
@@ -1767,7 +1851,7 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
     for log in logs:
         ok = log.status == "success"
         metrics = ", ".join(
-            f"{name}={value:.4g}" for name, value in sorted(log.results.metrics.items())
+            f"{name}={_format_metric(value)}" for name, value in sorted(log.results.metrics.items())
         )
         detail = metrics or (log.error or "")
         row = f"  [{_styled(_display_status(log.status), _GREEN if ok else _RED)}] {log.eval.task}"
@@ -1905,7 +1989,7 @@ def _cmd_inspect(
     from inspect_robots import read_eval_log
 
     log = read_eval_log(path)
-    _print_step_limit_notice(log, log.eval.task == "adhoc")
+    _print_step_limit_notice(log, log.eval.task in ("adhoc", "auto"))
     print(f"task:        {log.eval.task}")
     # One shared instruction (the adhoc case) reads as run-level identity;
     # differing instructions print per scene below instead. Instructions are
@@ -1950,12 +2034,10 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {'n/a' if value is None else f'{value:.4g}'}")
+        print(f"  {name}: {_format_metric(value)}")
     print("scenes:")
     for scene in log.samples:
-        reduced = "  ".join(
-            f"{k}={'n/a' if v is None else f'{v:.4g}'}" for k, v in sorted(scene.reduced.items())
-        )
+        reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))
         step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
         details = [reduced] if reduced else []
         if step_limit_count:
@@ -2690,6 +2772,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         ("embodiment", defaults.embodiment, defaults.embodiment_source),
         ("sim_embodiment", defaults.sim_embodiment, defaults.sim_embodiment_source),
         ("scorer", defaults.scorer, None),
+        ("grader", defaults.grader, None),
         ("max_steps", defaults.max_steps, None),
         ("store_frames", defaults.store_frames, None),
         ("rerun", defaults.rerun, None),

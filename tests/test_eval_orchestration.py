@@ -3,6 +3,8 @@ partial-record delivery, fail_on_error timing, embodiment lifecycle, seeding."""
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -137,6 +139,41 @@ class _CountingScorer:
         del record, target
         self.calls += 1
         return Score(value=1.0)
+
+
+class _CaptureGrader:
+    """Record every trial presented to the pre-scoring grader seam.
+
+    ``parked_at_grade`` snapshots ``parked_observation`` at call time, so a
+    regression that populated the field only after ``before_scoring`` returned
+    cannot slip past assertions made on the shared mutable record.
+    """
+
+    name = "capture"
+
+    def __init__(self) -> None:
+        self.records: list[TrialRecord] = []
+        self.parked_at_grade: list[object] = []
+
+    def grade(self, record: TrialRecord, scene: Scene) -> None:
+        del scene
+        self.records.append(record)
+        self.parked_at_grade.append(record.parked_observation)
+
+
+class _ParkedEmbodiment(CubePickEmbodiment):
+    """Return or raise one configured result from the optional park hook."""
+
+    def __init__(self, park_result: object) -> None:
+        super().__init__()
+        self.park_result = park_result
+        self.park_calls = 0
+
+    def observe_parked(self) -> object:
+        self.park_calls += 1
+        if isinstance(self.park_result, BaseException):
+            raise self.park_result
+        return self.park_result
 
 
 class _ScriptedOperatorInput:
@@ -386,6 +423,121 @@ def test_categorical_scorer_with_mean_reducer_degrades_to_error_log(tmp_path: Pa
     assert log.results.metrics == {}  # the failed reducer contributes no metric
 
 
+def test_raising_scorer_degrades_to_error_log(tmp_path: Path) -> None:
+    # Issue #451: scoring runs after the rollout, so an exception escaping a
+    # scorer used to discard every trial that had already been paid for.
+    class _FlakyScorer:
+        name = "flaky"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            from inspect_robots.scorer import Score
+
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("scorer bug")
+            return Score(value=True)
+
+    task = _task(epochs=2, scorer=_FlakyScorer())
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error is not None and "scorer 'flaky' failed" in log.error
+    assert log.samples[0].status == "error"
+    assert log.results.total_trials == 2  # the trials that ran are still there
+    assert list(tmp_path.glob("*.json"))  # ...and the log reached disk
+
+
+@pytest.mark.parametrize(
+    "halt",
+    [SafetyAbort("e-stop"), EmbodimentFault("motor stalled")],
+    ids=["safety_abort", "embodiment_fault"],
+)
+def test_scorer_halt_signals_stop_the_eval(tmp_path: Path, halt: Exception) -> None:
+    # The scorer guard must not contain halt signals: swallowing one would let
+    # the next rollout start after an explicit abort or a hardware fault.
+    class _HaltingScorer:
+        name = "halting"
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            raise halt
+
+    class _CountingEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.resets += 1
+            return super().reset(scene, seed=seed)
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id=f"s{i}", instruction="reach", init_seed=i) for i in range(3)],
+        scorer=_HaltingScorer(),  # type: ignore[arg-type]
+        max_steps=60,
+    )
+
+    embodiment = _CountingEmbodiment()
+    with pytest.raises(type(halt)):
+        eval(task, ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert embodiment.resets == 1  # the scene that halted, and no scene after it
+
+    # eval_set re-raises halts rather than turning them into an error log,
+    # so the remaining tasks must not run either.
+    embodiment = _CountingEmbodiment()
+    with pytest.raises(type(halt)):
+        eval_set([task, task], ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert embodiment.resets == 1
+
+
+def test_scorer_returning_unconvertible_value_degrades_to_error_log(
+    tmp_path: Path,
+) -> None:
+    # The same guard covers value_to_float(): a scorer can fail by returning a
+    # bad value just as easily as by raising.
+    class _BadValueScorer:
+        name = "bad_value"
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            from inspect_robots.scorer import Score
+
+            return Score(value=object())  # type: ignore[arg-type]
+
+    task = _task(scorer=_BadValueScorer())
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error is not None and "scorer 'bad_value' failed" in log.error
+    assert log.results.total_trials == 1
+
+
+def test_one_failing_scorer_keeps_the_others(tmp_path: Path) -> None:
+    # The guard is per scorer, so a sibling scorer's value for the same trial
+    # must survive. Two epochs also drive the repeat-failure path, where the run
+    # is already "error" and only the scene detail accumulates.
+    class _BoomScorer:
+        name = "boom"
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            raise RuntimeError("boom")
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=[_BoomScorer(), success_at_end()],  # type: ignore[list-item]
+        max_steps=60,
+        epochs=2,
+    )
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert "boom" not in log.results.metrics  # the failed scorer contributes none
+    assert "success_at_end" in log.results.metrics  # ...the healthy one still does
+    # The run-level error keeps the first failure; the scene chains both.
+    scene_error = log.samples[0].error
+    assert scene_error is not None and scene_error.count("scorer 'boom' failed") == 2
+
+
 # --------------------------------------------------------------------------- #
 # 2. Errored trials are never scored and cannot poison metrics.
 # --------------------------------------------------------------------------- #
@@ -401,7 +553,9 @@ def test_errored_trials_are_not_scored(tmp_path: Path) -> None:
     assert log.results.errored_trials == 1
     assert log.results.total_trials == 2
     assert scene.termination_reasons == ("success", None)
+    assert scene.judgement_sources == (None, None)
     assert len(scene.termination_reasons) == len(scene.epochs)
+    assert len(scene.judgement_sources) == len(scene.epochs)
 
 
 def test_step_limit_reason_and_horizon_are_recorded(tmp_path: Path) -> None:
@@ -507,6 +661,21 @@ def test_fail_on_error_true_stops_at_first_error(tmp_path: Path) -> None:
     assert log.results.total_trials == 1  # stopped immediately, not after 3 epochs
 
 
+@pytest.mark.parametrize(
+    "invalid_foe", [-1, -0.5, float("nan"), float("inf"), float("-inf"), "invalid"]
+)
+def test_eval_rejects_invalid_fail_on_error(tmp_path: Path, invalid_foe: object) -> None:
+    task = _task(epochs=1)
+    with pytest.raises(ConfigError, match="fail_on_error must be a boolean or finite float >= 0"):
+        eval(
+            task,
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            fail_on_error=invalid_foe,  # type: ignore[arg-type]
+        )
+
+
 # --------------------------------------------------------------------------- #
 # 5. Embodiment lifecycle: eval closes what it resolves, and only that.
 # --------------------------------------------------------------------------- #
@@ -553,18 +722,24 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     assert logs[0].status == "success"
 
 
-def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
+def test_eval_binds_spaces_frames_and_scenes_to_duck_typed_sinks_before_start(
     tmp_path: Path,
 ) -> None:
+    """Offer optional sink bindings in order and skip absent or non-callable hooks."""
+
     class _SpaceAware(NullSink):
         def __init__(self) -> None:
-            self.calls: list[tuple[str, object, object] | tuple[str, str | None] | tuple[str]] = []
+            self.calls: list[tuple[object, ...]] = []
 
         def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
             self.calls.append(("bind_spaces", action_space, observation_space))
 
         def bind_frames_dir(self, frames_dir: str | None) -> None:
             self.calls.append(("bind_frames_dir", frames_dir))
+
+        def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+            """Record the offered scenes for ordering assertions."""
+            self.calls.append(("bind_scenes", scenes))
 
         def on_eval_start(self, spec: EvalSpec) -> None:
             del spec
@@ -573,14 +748,16 @@ def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
     class _OddAttr(NullSink):
         bind_spaces = "not a hook"
         bind_frames_dir = "not a hook"
+        bind_scenes = "not a hook"
 
     embodiment = CubePickEmbodiment()
     aware = _SpaceAware()
     no_hook = NullSink()
     odd = _OddAttr()
 
+    task = _task(max_steps=1)
     (log,) = eval(
-        _task(max_steps=1),
+        task,
         ScriptedPolicy(),
         embodiment,
         sinks=[aware, no_hook, odd],
@@ -595,12 +772,15 @@ def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
             embodiment.info.observation_space,
         ),
         ("bind_frames_dir", None),
+        ("bind_scenes", task.scenes),
         ("on_eval_start",),
     ]
     assert getattr(no_hook, "bind_spaces", None) is None
     assert odd.bind_spaces == "not a hook"
     assert getattr(no_hook, "bind_frames_dir", None) is None
     assert odd.bind_frames_dir == "not a hook"
+    assert getattr(no_hook, "bind_scenes", None) is None
+    assert odd.bind_scenes == "not a hook"
 
 
 def test_eval_binds_the_exact_stored_frames_directory(tmp_path: Path) -> None:
@@ -978,6 +1158,179 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert success
     assert logs[0].samples[0].operator_judgements == ("pass",)
     assert logs[0].results.metrics["operator"] == 1.0
+
+
+def test_eval_set_rejects_empty_task_list(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=r"eval_set\(\) requires at least one task"):
+        eval_set(
+            [],
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+
+def test_eval_observes_parked_once_before_grading(tmp_path: Path) -> None:
+    parked = Observation(images={"parked": np.zeros((2, 2, 3), dtype=np.uint8)})
+    embodiment = _ParkedEmbodiment(parked)
+    grader = _CaptureGrader()
+
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "success"
+    assert embodiment.park_calls == 1
+    assert len(grader.records) == 1
+    assert grader.parked_at_grade[0] is parked
+
+
+def test_eval_does_not_observe_parked_without_a_grader(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+
+    (log,) = eval(_task(max_steps=1), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+
+    assert log.status == "success"
+    assert embodiment.park_calls == 0
+
+
+def test_eval_does_not_observe_parked_after_operator_judgement(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+    grader = _CaptureGrader()
+    operator_input = _ScriptedOperatorInput([[ConsolePoll(end=EndRequest(verdict="y"))]])
+
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        operator_input=operator_input,
+        log_dir=str(tmp_path),
+    )
+
+    assert embodiment.park_calls == 0
+    assert grader.records[0].operator_judgement == "y"
+    assert log.samples[0].judgement_sources == ("console",)
+
+
+def test_eval_does_not_observe_parked_after_definitive_termination(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+    embodiment.goal_radius = 2.0
+    grader = _CaptureGrader()
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        log_dir=str(tmp_path),
+    )
+
+    assert embodiment.park_calls == 0
+    assert grader.records[0].termination_reason == "success"
+
+
+def test_eval_degrades_when_observe_parked_raises(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(RuntimeError("park jammed"))
+    grader = _CaptureGrader()
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=r"observe_parked\(\) failed with RuntimeError: park jammed",
+    ):
+        (log,) = eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+    assert log.samples[0].epochs[0] == {"success_at_end": 0.0}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [SafetyAbort("park unsafe"), EmbodimentFault("park faulted")],
+)
+def test_eval_halts_when_observe_parked_raises_a_halt_error(
+    error: Exception, tmp_path: Path
+) -> None:
+    embodiment = _ParkedEmbodiment(error)
+
+    with pytest.raises(type(error), match=str(error)):
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=_CaptureGrader(),
+            log_dir=str(tmp_path),
+        )
+
+
+def test_eval_accepts_observe_parked_declining_without_warning(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(None)
+    grader = _CaptureGrader()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+
+
+def test_eval_rejects_non_observation_parked_result(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment("not an observation")
+    grader = _CaptureGrader()
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=(
+            "observe_parked\\(\\) returned str; expected Observation or None; "
+            "grading from last-step frames"
+        ),
+    ):
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+
+
+def test_eval_ignores_non_callable_observe_parked(tmp_path: Path) -> None:
+    class _OddAttr(CubePickEmbodiment):
+        observe_parked = "not a hook"
+
+    grader = _CaptureGrader()
+    embodiment = _OddAttr()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+    assert _OddAttr.observe_parked == "not a hook"
 
 
 # --------------------------------------------------------------------------- #
