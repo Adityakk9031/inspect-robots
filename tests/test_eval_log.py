@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from inspect_robots import eval_set, read_eval_log
 from inspect_robots._html import render_html
 from inspect_robots._summarize import TrialTranscript, build_digest
+from inspect_robots.errors import EmbodimentFault, SafetyAbort
 from inspect_robots.log import (
     SCHEMA_VERSION,
     EvalLog,
@@ -18,11 +21,12 @@ from inspect_robots.log import (
     EvalSpec,
     EvalStats,
     SceneResult,
+    _json_safe_scene_metadata,
 )
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
-from inspect_robots.task import Task
+from inspect_robots.task import Epochs, Task
 
 
 def _golden_log() -> EvalLog:
@@ -53,7 +57,12 @@ def _golden_log() -> EvalLog:
                 reduced={"success_at_end": 1.0},
                 epochs=({"success_at_end": 1.0},),
                 instruction="reach the cube",
+                scene_metadata={
+                    "rubric": "touch the cube",
+                    "taskgen": {"model": "vision"},
+                },
                 operator_judgements=("yes",),
+                judgement_sources=("prompt",),
                 operator_notes=("gripper closed early",),
                 operator_messages=(({"t": 3, "text": "keep left <now>"},),),
                 trial_metadata=({"foo": "bar"},),
@@ -67,6 +76,25 @@ def _golden_log() -> EvalLog:
             ),
         ),
     )
+
+
+def test_json_safe_scene_metadata_filters_and_deep_copies() -> None:
+    """Retain JSON-safe values while detaching nested data from its source."""
+    nested = {"thresholds": [1, 2]}
+    metadata = {
+        "rubric": "touch the cube",
+        "nested": nested,
+        "adapter_object": object(),
+    }
+
+    safe = _json_safe_scene_metadata(metadata)
+
+    assert safe == {
+        "rubric": "touch the cube",
+        "nested": {"thresholds": [1, 2]},
+    }
+    nested["thresholds"].append(3)
+    assert safe["nested"] == {"thresholds": [1, 2]}
 
 
 def test_eval_log_round_trips_through_dict() -> None:
@@ -93,7 +121,12 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.eval.git_commit == "deadbeef"
     assert restored.samples[0].scene_id == "s0"
     assert restored.samples[0].instruction == "reach the cube"
+    assert restored.samples[0].scene_metadata == {
+        "rubric": "touch the cube",
+        "taskgen": {"model": "vision"},
+    }
     assert restored.samples[0].operator_judgements == ("yes",)
+    assert restored.samples[0].judgement_sources == ("prompt",)
     assert restored.samples[0].operator_notes == ("gripper closed early",)
     assert restored.samples[0].operator_messages == (({"t": 3, "text": "keep left <now>"},),)
     assert isinstance(restored.samples[0].operator_messages, tuple)
@@ -125,7 +158,9 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     del data["eval"]["max_seconds"]
     for sample in data["samples"]:
         del sample["instruction"]
+        del sample["scene_metadata"]
         del sample["operator_judgements"]
+        del sample["judgement_sources"]
         del sample["operator_notes"]
         del sample["operator_messages"]
         del sample["trial_metadata"]
@@ -136,7 +171,9 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     restored = read_eval_log(str(path))
     assert restored.samples[0].reduced == {"success_at_end": 1.0}
     assert restored.samples[0].instruction is None
+    assert restored.samples[0].scene_metadata == {}
     assert restored.samples[0].operator_judgements == ()
+    assert restored.samples[0].judgement_sources == ()
     assert restored.samples[0].operator_notes == ()
     assert restored.samples[0].operator_messages == ()
     assert restored.samples[0].trial_metadata == ()
@@ -232,6 +269,45 @@ def test_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
     assert not list(tmp_path.glob("*.tmp"))  # atomic temp+rename left nothing behind
 
 
+def test_eval_persists_only_json_safe_scene_metadata(tmp_path: Path) -> None:
+    from inspect_robots import eval
+
+    circular: list[object] = []
+    circular.append(circular)
+    task = Task(
+        name="metadata",
+        scenes=[
+            Scene(
+                id="s0",
+                instruction="reach",
+                init_seed=0,
+                metadata={
+                    "rubric": "touch the cube",
+                    "nested": {"thresholds": [1, 2]},
+                    "adapter_object": object(),
+                    "circular": circular,
+                },
+            )
+        ],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+
+    log = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))[0]
+
+    assert log.status == "success"
+    assert log.samples[0].scene_metadata == {
+        "rubric": "touch the cube",
+        "nested": {"thresholds": [1, 2]},
+    }
+    # The persisted copy is deep: mutating the live scene metadata after the
+    # fact (as an adapter might mid-run) must not reach into the log.
+    cast(dict[str, Any], task.scenes[0].metadata["nested"])["thresholds"].append(object())
+    assert log.samples[0].scene_metadata["nested"] == {"thresholds": [1, 2]}
+    written = read_eval_log(str(next(tmp_path.glob("*.json"))))
+    assert written.samples[0].scene_metadata == log.samples[0].scene_metadata
+
+
 def test_store_frames_writes_side_cars(tmp_path: Path) -> None:
     from inspect_robots import eval
 
@@ -266,6 +342,122 @@ def test_eval_set_runs_multiple_tasks(tmp_path: Path) -> None:
     assert success is True
     assert len(logs) == 2
     assert {log.eval.task for log in logs} == {"a", "b"}
+
+
+def test_eval_set_reports_failed_task_and_keeps_completed_logs(tmp_path: Path) -> None:
+    """Return earlier logs plus an in-memory error row when a later task fails."""
+
+    def task(name: str, *, reducer: str = "mean") -> Task:
+        return Task(
+            name=name,
+            scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+            scorer=success_at_end(),
+            max_steps=60,
+            epochs=Epochs(count=1, reducer=reducer),
+        )
+
+    good = task("good")
+    bad = task("bad", reducer="bogus")
+    success, logs = eval_set(
+        [good, bad],
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert success is False
+    assert len(logs) == 2
+    assert logs[0].status == "success"
+    assert logs[0].eval.task == good.name
+    assert logs[1].status == "error"
+    assert logs[1].error is not None and "bogus" in logs[1].error
+    assert logs[1].eval.task == bad.name
+    assert logs[1].eval.policy == "scripted"
+    assert logs[1].eval.embodiment == "cubepick"
+    assert logs[1].eval.max_steps == bad.max_steps
+    assert logs[1].samples == ()
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_eval_set_error_log_preserves_string_component_names(tmp_path: Path) -> None:
+    """Keep registry strings in a synthetic spec when task resolution fails."""
+    success, logs = eval_set(
+        "missing-task",
+        "scripted",
+        "cubepick",
+        log_dir=str(tmp_path),
+        seed=17,
+    )
+
+    assert success is False
+    assert len(logs) == 1
+    assert logs[0].status == "error"
+    assert logs[0].eval.task == "missing-task"
+    assert logs[0].eval.policy == "scripted"
+    assert logs[0].eval.embodiment == "cubepick"
+    assert logs[0].eval.seed == 17
+    assert logs[0].eval.max_steps is None
+    assert logs[0].eval.max_seconds is None
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_eval_set_error_log_falls_back_when_embodiment_info_raises(
+    tmp_path: Path,
+) -> None:
+    """A broken adapter descriptor must not mask the task's error log."""
+
+    class _RaisingInfoEmbodiment:
+        @property
+        def info(self) -> Any:
+            raise RuntimeError("broken embodiment info")
+
+    task = Task(
+        name="broken-info",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+    embodiment = _RaisingInfoEmbodiment()
+
+    success, logs = eval_set(
+        task,
+        ScriptedPolicy(),
+        cast(Any, embodiment),
+        log_dir=str(tmp_path),
+    )
+
+    assert success is False
+    assert len(logs) == 1
+    log = logs[0]
+    assert log.status == "error"
+    assert log.eval.embodiment == type(embodiment).__name__
+    assert log.error is not None and "RuntimeError" in log.error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [SafetyAbort("unsafe"), EmbodimentFault("faulted"), KeyboardInterrupt("stopped")],
+)
+def test_eval_set_propagates_halts_and_interrupts(
+    error: BaseException,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never contain safety halts, embodiment faults, or keyboard interrupts."""
+
+    def raising_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args, kwargs
+        raise error
+
+    monkeypatch.setattr(sys.modules["inspect_robots.eval"], "eval", raising_eval)
+
+    with pytest.raises(type(error), match=str(error)):
+        eval_set(
+            "cubepick-reach",
+            "scripted",
+            "cubepick",
+            log_dir=str(tmp_path),
+        )
 
 
 def test_store_frames_runs_do_not_overwrite_each_other(tmp_path: Path) -> None:
