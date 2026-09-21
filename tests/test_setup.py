@@ -4006,7 +4006,7 @@ def test_run_setup_options_suggest_non_bool_or_raising_falls_back(
         arg="opt2",
         label="Opt2",
         default=False,
-        suggest=lambda args: "truthy string",  # type: ignore[return-value]
+        suggest=lambda args: "truthy string",  # type: ignore[arg-type,return-value]
     )
 
     class _Factory:

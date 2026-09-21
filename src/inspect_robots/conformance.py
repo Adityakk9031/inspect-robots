@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np

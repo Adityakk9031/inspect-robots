@@ -7,12 +7,12 @@ import math
 import os
 import re
 import struct
+import types
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-import types
 from typing import IO
 
 from inspect_robots.conformance import (
