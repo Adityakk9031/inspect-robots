@@ -423,6 +423,78 @@ def test_categorical_scorer_with_mean_reducer_degrades_to_error_log(tmp_path: Pa
     assert log.results.metrics == {}  # the failed reducer contributes no metric
 
 
+def test_raising_scorer_degrades_to_error_log(tmp_path: Path) -> None:
+    # Issue #451: scoring runs after the rollout, so an exception escaping a
+    # scorer used to discard every trial that had already been paid for.
+    class _FlakyScorer:
+        name = "flaky"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            from inspect_robots.scorer import Score
+
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("scorer bug")
+            return Score(value=True)
+
+    task = _task(epochs=2, scorer=_FlakyScorer())
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error is not None and "scorer 'flaky' failed" in log.error
+    assert log.samples[0].status == "error"
+    assert log.results.total_trials == 2  # the trials that ran are still there
+    assert list(tmp_path.glob("*.json"))  # ...and the log reached disk
+
+
+def test_scorer_returning_unconvertible_value_degrades_to_error_log(
+    tmp_path: Path,
+) -> None:
+    # The same guard covers value_to_float(): a scorer can fail by returning a
+    # bad value just as easily as by raising.
+    class _BadValueScorer:
+        name = "bad_value"
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            from inspect_robots.scorer import Score
+
+            return Score(value=object())  # type: ignore[arg-type]
+
+    task = _task(scorer=_BadValueScorer())
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error is not None and "scorer 'bad_value' failed" in log.error
+    assert log.results.total_trials == 1
+
+
+def test_one_failing_scorer_keeps_the_others(tmp_path: Path) -> None:
+    # The guard is per scorer, so a sibling scorer's value for the same trial
+    # must survive. Two epochs also drive the repeat-failure path, where the run
+    # is already "error" and only the scene detail accumulates.
+    class _BoomScorer:
+        name = "boom"
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            raise RuntimeError("boom")
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=[_BoomScorer(), success_at_end()],  # type: ignore[list-item]
+        max_steps=60,
+        epochs=2,
+    )
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert "boom" not in log.results.metrics  # the failed scorer contributes none
+    assert "success_at_end" in log.results.metrics  # ...the healthy one still does
+    # The run-level error keeps the first failure; the scene chains both.
+    scene_error = log.samples[0].error
+    assert scene_error is not None and scene_error.count("scorer 'boom' failed") == 2
+
+
 # --------------------------------------------------------------------------- #
 # 2. Errored trials are never scored and cannot poison metrics.
 # --------------------------------------------------------------------------- #
