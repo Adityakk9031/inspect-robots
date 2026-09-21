@@ -45,6 +45,9 @@ eval(task, policy, embodiment, sinks=[JsonLogSink("logs"), RerunSink("run.rrd")]
 
 `eval_set(..., sinks=...)` reuses the same sink instances across its sequential
 task runs. Caller-supplied sinks must reset their run state in `on_eval_start`.
+A reused `LiveLogSink` removes the previous run's stale "running" snapshot at
+the next `on_eval_start`; through the Python API, the last task's orphan remains
+until that next start.
 
 ## Rerun visualization
 
@@ -159,8 +162,10 @@ consumers should follow that pointer instead of reconstructing filenames.
 
 Action side-cars are owned by `eval()`, not a sink. They are therefore still
 written when `sinks=` replaces `JsonLogSink`. Pass `store_actions=False` to
-disable them. A non-finite action or filesystem failure emits a warning, leaves
-no final file or metadata pointer, and does not change the eval status.
+disable them. A filesystem failure emits a warning, leaves no final file or
+metadata pointer, and does not change the eval status. A non-finite policy
+action is rejected by the rollout before any step is recorded and errors the
+trial.
 
 ## Frame side-cars
 
@@ -171,6 +176,22 @@ a per-run subdirectory of `<log_dir>/frames` through a
 memory-safe and remain scorable from disk. Trial ids repeat across runs, so
 each eval gets its own directory; read the exact path from the log's
 `stats.frames_dir` rather than globbing `<log_dir>/frames` directly.
+
+The frame sequence includes both sides of every action. The reset observation
+is stored at index `0`; the result of step `t` is stored at `t + 1`. A camera
+present throughout a trial with `n` completed steps therefore produces `n + 1`
+files, including the terminal post-action state. In each
+[`StepRecord`](/api/#inspect_robots.rollout.StepRecord),
+`image_refs` points to the pre-action frames and `result_image_refs` points to
+the post-action frames. Both corresponding `Observation.images` mappings are
+empty while a frame store is active. Consumers must load the appropriate
+`FrameRef` instead of reading inline arrays. Without a frame store, observations
+remain inline and both ref mappings are `None`.
+
+Frame storage starts immediately after reset, before the first policy action.
+If the policy fails during its first decision, reset frames can remain on disk
+even though no `StepRecord` exists. This is intentional: the initial sensor
+state is still available for failure forensics.
 
 ```python
 eval(task, policy, embodiment, log_dir="logs", store_frames=True)
@@ -206,10 +227,11 @@ the placeholder in place.
 
 `FrameStore` sanitizes trial and camera names before building
 `{trial}_{camera}_{t:06d}.npy`. When the sanitizer rewrites a name, use
-`StepRecord.image_refs` and `FrameRef.path` as the authoritative mapping instead
-of assembling the path from the transcript label. That remains the right advice
-for programmatic consumers. The `view` command performs this join internally
-with the same sanitizer and an exact-match-or-degrade contract.
+`StepRecord.image_refs` for the pre-action observation,
+`StepRecord.result_image_refs` for the post-action observation, and
+`FrameRef.path` as the authoritative file mapping instead of assembling paths
+from transcript labels or step indices. The `view` command performs its join
+internally with the same sanitizer and an exact-match-or-degrade contract.
 
 ## Wire capture
 
