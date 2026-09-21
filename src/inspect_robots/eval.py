@@ -654,9 +654,28 @@ def _run_eval(
                         before_scoring(record, scene)
                     epoch_values: dict[str, float] = {}
                     for scorer in scorers:
-                        score = scorer(record, scene.target)
+                        try:
+                            score = scorer(record, scene.target)
+                            value = value_to_float(score.value)
+                        except (SafetyAbort, EmbodimentFault):
+                            # Halt signals are not scoring errors: containing
+                            # them here would let the next rollout start after
+                            # an explicit safety abort or a hardware fault.
+                            raise
+                        except Exception as exc:
+                            # A scorer failure degrades to an error log - it must
+                            # never crash the eval and lose the trials that ran.
+                            detail = f"scorer {scorer.name!r} failed: {exc}"
+                            scene_status = "error"
+                            scene_error = (
+                                detail if scene_error is None else f"{scene_error}; {detail}"
+                            )
+                            if status == "success":
+                                status = "error"
+                                error = detail
+                            continue
                         per_scorer_scores[scorer.name].append(score)
-                        epoch_values[scorer.name] = value_to_float(score.value)
+                        epoch_values[scorer.name] = value
                     epoch_dicts.append(epoch_values)
                     # Captured at the same instant as the judgement, on purpose:
                     # these fields are documented as strictly parallel, so a later
