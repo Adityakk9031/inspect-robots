@@ -9,6 +9,21 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Setup wizard:** embodiment plugins can declare bounded numeric settings,
+  including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
+  ([plan 0081](plans/0081-number-slots.md),
+  [#432](https://github.com/robocurve/inspect-robots/issues/432)).
+
+- **Docs:** new guide page of example commands covering model selection,
+  reasoning-effort levels, VLA policies (MolmoAct 2, Pi 0/0.5 via XPolicyLab),
+  control interfaces, instruction sources, operator interfaces, and eval sets
+  ([docs/guide/examples.md](docs/guide/examples.md)).
+
+- **Core:** evaluation logs now record which path produced each operator
+  judgement in `SceneResult.judgement_sources`
+  ([plan 0080](plans/0080-judgement-sources.md),
+  [#413](https://github.com/robocurve/inspect-robots/issues/413)).
+
 - **Core:** `is_affirmative_verdict()` is public API. It owns the whole
   operator-verdict contract (the recognized affirmative vocabulary plus the
   case-insensitive, whitespace-tolerant comparison and the "no judgement
@@ -16,6 +31,28 @@ All notable changes to this project are documented here. The format is based on
   of copying the vocabulary and importing the private `scorer._OPERATOR_SUCCESS`.
 
 ### Fixed
+
+- **Core:** `eval_set()` now preserves completed task logs when a later task
+  raises, reports the failure as an in-memory error log, and continues with
+  the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
+  `eval()` (raised outside a trial) and `KeyboardInterrupt` still propagate. A
+  halt inside a trial ends that task with an error log and, as before this
+  change, the set continues to the next task
+  ([plan 0079](plans/0079-eval-set-error-log.md),
+  [#298](https://github.com/robocurve/inspect-robots/issues/298)).
+
+- **Core:** rollout now rejects non-finite and non-numeric actions before they
+  reach an embodiment. A NaN action on the default CLI chain now errors the
+  trial as a `PolicyError` and continues under `fail_on_error=False`, instead
+  of halting the eval. A non-finite action introduced by an approver is a
+  `SafetyAbort` ([plan 0077](plans/0077-rollout-nonfinite-actions.md),
+  [#356](https://github.com/robocurve/inspect-robots/issues/356)).
+
+- **Core:** an escaped quote no longer terminates a quoted `.env` value, while
+  backslashes stay literal; a quoted value ending in a lone backslash is now
+  kept literally with its quotes
+  ([plan 0078](plans/0078-dotenv-escaped-quote.md),
+  [#291](https://github.com/robocurve/inspect-robots/issues/291)).
 
 - **Agent plugin (0.26.0):** absolute-target control no longer fails when an
   embodiment exposes several state fields of the action's shape (e.g. a 14-D

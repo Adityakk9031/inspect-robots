@@ -45,6 +45,9 @@ eval(task, policy, embodiment, sinks=[JsonLogSink("logs"), RerunSink("run.rrd")]
 
 `eval_set(..., sinks=...)` reuses the same sink instances across its sequential
 task runs. Caller-supplied sinks must reset their run state in `on_eval_start`.
+A reused `LiveLogSink` removes the previous run's stale "running" snapshot at
+the next `on_eval_start`; through the Python API, the last task's orphan remains
+until that next start.
 
 ## Rerun visualization
 
@@ -159,8 +162,10 @@ consumers should follow that pointer instead of reconstructing filenames.
 
 Action side-cars are owned by `eval()`, not a sink. They are therefore still
 written when `sinks=` replaces `JsonLogSink`. Pass `store_actions=False` to
-disable them. A non-finite action or filesystem failure emits a warning, leaves
-no final file or metadata pointer, and does not change the eval status.
+disable them. A filesystem failure emits a warning, leaves no final file or
+metadata pointer, and does not change the eval status. A non-finite policy
+action is rejected by the rollout before any step is recorded and errors the
+trial.
 
 ## Frame side-cars
 
