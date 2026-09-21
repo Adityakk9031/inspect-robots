@@ -195,8 +195,8 @@ def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "type": "function",
                 "name": function["name"],
-                "description": function["description"],
-                "parameters": function["parameters"],
+                "description": function.get("description", ""),
+                "parameters": function.get("parameters", {"type": "object", "properties": {}}),
                 "strict": False,
             }
         )
