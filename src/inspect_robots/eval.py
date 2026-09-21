@@ -608,6 +608,11 @@ def _run_eval(
                         try:
                             score = scorer(record, scene.target)
                             value = value_to_float(score.value)
+                        except (SafetyAbort, EmbodimentFault):
+                            # Halt signals are not scoring errors: containing
+                            # them here would let the next rollout start after
+                            # an explicit safety abort or a hardware fault.
+                            raise
                         except Exception as exc:
                             # A scorer failure degrades to an error log - it must
                             # never crash the eval and lose the trials that ran.

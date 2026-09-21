@@ -449,6 +449,49 @@ def test_raising_scorer_degrades_to_error_log(tmp_path: Path) -> None:
     assert list(tmp_path.glob("*.json"))  # ...and the log reached disk
 
 
+@pytest.mark.parametrize(
+    "halt",
+    [SafetyAbort("e-stop"), EmbodimentFault("motor stalled")],
+    ids=["safety_abort", "embodiment_fault"],
+)
+def test_scorer_halt_signals_stop_the_eval(tmp_path: Path, halt: Exception) -> None:
+    # The scorer guard must not contain halt signals: swallowing one would let
+    # the next rollout start after an explicit abort or a hardware fault.
+    class _HaltingScorer:
+        name = "halting"
+
+        def __call__(self, record: TrialRecord, target: object) -> object:
+            raise halt
+
+    class _CountingEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.resets += 1
+            return super().reset(scene, seed=seed)
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id=f"s{i}", instruction="reach", init_seed=i) for i in range(3)],
+        scorer=_HaltingScorer(),  # type: ignore[arg-type]
+        max_steps=60,
+    )
+
+    embodiment = _CountingEmbodiment()
+    with pytest.raises(type(halt)):
+        eval(task, ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert embodiment.resets == 1  # the scene that halted, and no scene after it
+
+    # eval_set re-raises halts rather than turning them into an error log,
+    # so the remaining tasks must not run either.
+    embodiment = _CountingEmbodiment()
+    with pytest.raises(type(halt)):
+        eval_set([task, task], ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert embodiment.resets == 1
+
+
 def test_scorer_returning_unconvertible_value_degrades_to_error_log(
     tmp_path: Path,
 ) -> None:
