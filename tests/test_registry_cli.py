@@ -1472,6 +1472,19 @@ def test_eval_set_summary_surfaces_seconds_horizon(
     assert "[completed] timed [120s -> 1200 steps at 10 Hz]" in out
 
 
+def test_eval_set_summary_formats_none_metric_as_na(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="unscored_task")
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+    )
+    cli._print_eval_set_summary(True, [log], "logs")
+    out = capsys.readouterr().out
+    assert "custom_metric=n/a" in out
+
+
 def test_cli_eval_set_ctrl_c_reports_partial_logs_and_exits_130(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3975,6 +3988,19 @@ def test_run_summary_shows_cancelled_scene_detail(
     cli._print_run_summary(log, "run.json", is_adhoc=False)
 
     assert "[cancelled] s0: cancelled by user" in capsys.readouterr().out
+
+
+def test_run_summary_formats_none_metric_as_na(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _transcript_log()
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+    )
+    cli._print_run_summary(log, "run.json", is_adhoc=False)
+    out = capsys.readouterr().out
+    assert "custom_metric: n/a" in out
 
 
 def test_transcript_rendering_degrades_lone_surrogates_instead_of_crashing(
