@@ -202,6 +202,19 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.eval.grader_config == {}
 
 
+def test_evalspec_positional_order_of_legacy_fields_is_preserved() -> None:
+    # ``grader`` / ``grader_config`` were added later; a caller that binds the
+    # older fields positionally must still land ``17, 120, 6.0`` on the horizon
+    # fields rather than on the new ones.
+    spec = EvalSpec("t", "p", "e", "now", "v", None, {}, {}, 17, 120, 6.0)
+
+    assert spec.seed == 17
+    assert spec.max_steps == 120
+    assert spec.max_seconds == 6.0
+    assert spec.grader is None
+    assert spec.grader_config == {}
+
+
 def test_seconds_horizon_round_trips_declared_and_resolved_values() -> None:
     spec = EvalSpec(
         task="timed",

@@ -56,6 +56,11 @@ class EvalSpec:
     git_commit: str | None = None
     policy_config: dict[str, Any] = field(default_factory=dict)
     embodiment_info: dict[str, Any] = field(default_factory=dict)
+    seed: int | None = None
+    max_steps: int | None = None
+    max_seconds: float | None = None
+    # Appended after ``max_seconds`` so the positional order of every field
+    # that predates them is preserved.
     # The run's grader by registry name ("operator", "vlm", a plugin's own
     # name), ``None`` when the run graded nothing. A log written before this
     # field existed also reads back as ``None``.
@@ -71,9 +76,6 @@ class EvalSpec:
     # ``metadata["rubric"]`` overrides it for that scene, and that value is
     # already persisted in ``SceneResult.scene_metadata``.
     grader_config: dict[str, Any] = field(default_factory=dict)
-    seed: int | None = None
-    max_steps: int | None = None
-    max_seconds: float | None = None
 
 
 @dataclass(frozen=True)
