@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import httpx
 
-from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall
+from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall, _retry_delay
 
 from ._capture import WireCapture
 
@@ -17,7 +17,8 @@ class ResponsesClient:
 
     Chat-format messages remain the policy transcript. This boundary translates
     them to Responses input items and preserves raw output items required to
-    replay reasoning-backed function calls.
+    replay reasoning-backed function calls. Provider ``Retry-After`` headers
+    take precedence over exponential backoff.
     """
 
     def __init__(
@@ -73,6 +74,7 @@ class ResponsesClient:
 
         last_error = "unknown error"
         for attempt in range(self._max_retries):
+            retry_response: httpx.Response | None = None
             t_start = time.time() if self._capture is not None else 0.0
             try:
                 response = self._http.post("/responses", json=body)
@@ -90,6 +92,7 @@ class ResponsesClient:
                     )
                 last_error = str(exc)
             else:
+                retry_response = response
                 if self._capture is not None:
                     self._capture.record(
                         attempt=attempt,
@@ -111,7 +114,7 @@ class ResponsesClient:
                 if response.status_code not in (429,) and response.status_code < 500:
                     raise RuntimeError(f"LLM request rejected — {last_error}")
             if attempt + 1 < self._max_retries:
-                time.sleep(self._backoff_s * 2**attempt)
+                time.sleep(_retry_delay(retry_response, backoff_s=self._backoff_s, attempt=attempt))
         raise RuntimeError(f"LLM request failed after {self._max_retries} attempts — {last_error}")
 
     def close(self) -> None:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -291,6 +292,8 @@ class AgentPolicyConfig(PolicyConfig):
     prior_learnings_sha256: str | None = None
     #: Best-effort module and qualified-name identity of the motion pre-check.
     pre_check: str | None = None
+    max_retries: int = 3
+    backoff_s: float = 1.0
 
 
 @dataclass(frozen=True, eq=False)
@@ -340,6 +343,8 @@ class LLMAgentPolicy(PolicyBase):
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
+        max_retries: int = 3,
+        backoff_s: float = 1.0,
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -415,6 +420,16 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
             raise ConfigError("max_llm_calls must be >= 1")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 1:
+            raise ConfigError("max_retries must be an int >= 1")
+        if (
+            isinstance(backoff_s, bool)
+            or not isinstance(backoff_s, (int, float))
+            or not math.isfinite(backoff_s)
+            or backoff_s < 0
+        ):
+            raise ConfigError("backoff_s must be finite and >= 0")
+        resolved_backoff_s = float(backoff_s)
         environ = dict(os.environ) if env is None else env
         requested_model = model or environ.get(ENV_MODEL)
         direct_claim = (
@@ -692,17 +707,42 @@ class LLMAgentPolicy(PolicyBase):
                 provider,
                 max_output_tokens=resolved_max_output_tokens,
                 speed=speed,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
             )
         elif wire == "responses":
-            self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
+            self._client = ResponsesClient(
+                provider,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                transport=transport,
+                capture=self._capture,
+            )
         elif wire == "gemini-live":
-            self._client = GeminiLiveClient(provider, capture=self._capture)
+            self._client = GeminiLiveClient(
+                provider,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                capture=self._capture,
+            )
         elif wire == "interactions":
-            self._client = InteractionsClient(provider, transport=transport, capture=self._capture)
+            self._client = InteractionsClient(
+                provider,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                transport=transport,
+                capture=self._capture,
+            )
         else:
-            self._client = ChatClient(provider, transport=transport, capture=self._capture)
+            self._client = ChatClient(
+                provider,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                transport=transport,
+                capture=self._capture,
+            )
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
         # Preserve the operator's requested effort exactly; when it is unset,
@@ -727,6 +767,8 @@ class LLMAgentPolicy(PolicyBase):
             speed=speed,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
+            max_retries=max_retries,
+            backoff_s=resolved_backoff_s,
             effort=resolved_effort,
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
