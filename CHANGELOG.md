@@ -9,6 +9,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** Optional `bind_task(envelope)` policy hook called before rollouts with
+  the task identity and horizon ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
+
+- **Agent plugin (0.26.0):** Surface environment step budget in system prompt and
+  per-observation step count ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
+
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
   ([plan 0081](plans/0081-number-slots.md),

@@ -2828,6 +2828,42 @@ def test_non_string_params_rejected(param: str, val: Any) -> None:
     assert expected_fix in str(exc_info.value)
 
 
+def test_bind_task_adds_step_budget_to_prompt_and_observation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.task import TaskEnvelope
+
+    policy = _policy(_Script([_tool_response("done", {"summary": "done"})]), transcript_echo=True)
+    policy.bind(CubePickEmbodiment().info)
+    policy.bind_task(TaskEnvelope(name="test_task", max_steps=200))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+    assert transcript is not None
+    assert "Environment step budget:" in transcript[0]["content"]
+    assert "You have 200 environment steps" in transcript[0]["content"]
+    assert "Pace yourself against the environment step budget" in transcript[0]["content"]
+
+    obs = Observation(
+        state={"eef_pos": np.zeros(3)},
+        instruction="reach",
+        extra={"env_step": 10},
+    )
+    # act will build observation content with step budget
+    policy.act(obs)
+    captured = capsys.readouterr()
+    assert "step 10/200" in captured.err
+    after_act = policy.transcript()
+    assert after_act is not None
+    user_msg = after_act[2]["content"]
+    assert isinstance(user_msg, list)
+    assert any(
+        "Step budget: step 10/200 (190 env steps remaining)" in part.get("text", "")
+        for part in user_msg
+        if isinstance(part, dict)
+    )
+
+
 def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> None:
     # Scene ID with traversal characters attempting to escape the run directory
     unsafe_id = "../escaped"
