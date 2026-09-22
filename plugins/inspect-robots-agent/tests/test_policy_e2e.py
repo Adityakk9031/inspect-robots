@@ -2862,3 +2862,36 @@ def test_bind_task_adds_step_budget_to_prompt_and_observation(
         for part in user_msg
         if isinstance(part, dict)
     )
+
+
+def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> None:
+    # Scene ID with traversal characters attempting to escape the run directory
+    unsafe_id = "../escaped"
+    script = _Script([_tool_response("done", {"summary": "done"})])
+    policy = _policy(script, wire_capture=True)
+    policy.bind(CubePickEmbodiment().info)
+
+    # Reset and start trial
+    policy.reset(Scene(id=unsafe_id, instruction="stop"))
+    policy.on_trial_start(unsafe_id, 0, str(tmp_path), "run-1")
+    policy.act(Observation())
+
+    record = TrialRecord(scene_id=unsafe_id, epoch=0, seed=0)
+    policy.on_trial_end(record, str(tmp_path), "run-1")
+
+    # Assert wire_capture metadata and file exists at sanitized path
+    wire_ptr = record.metadata["wire_capture"]
+    assert "../escaped" not in wire_ptr
+    wire_file = tmp_path / wire_ptr
+    assert wire_file.is_file()
+    assert wire_file.resolve().is_relative_to((tmp_path / "wire" / "run-1").resolve())
+
+    # Assert transcript metadata and file exists at sanitized path
+    transcript_ptr = record.metadata["transcript"]
+    assert "../escaped" not in transcript_ptr
+    transcript_file = tmp_path / transcript_ptr
+    assert transcript_file.is_file()
+    assert transcript_file.resolve().is_relative_to((tmp_path / "transcripts" / "run-1").resolve())
+
+    # Assert wire directory stem and transcript stem agree
+    assert Path(wire_ptr).parts[2] == Path(transcript_ptr).stem
