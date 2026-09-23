@@ -24,6 +24,7 @@ class ResponsesClient:
         self,
         provider: Provider,
         *,
+        service_tier: str | None = None,
         timeout_s: float = 120.0,
         max_retries: int = 3,
         backoff_s: float = 1.0,
@@ -31,6 +32,7 @@ class ResponsesClient:
         capture: WireCapture | None = None,
     ):
         self._provider = provider
+        self._service_tier = service_tier
         self._max_retries = max_retries
         self._backoff_s = backoff_s
         self._capture = capture
@@ -70,6 +72,8 @@ class ResponsesClient:
             body["temperature"] = temperature
         if reasoning_effort is not None:
             body["reasoning"] = {"effort": reasoning_effort}
+        if self._service_tier is not None:
+            body["service_tier"] = self._service_tier
 
         last_error = "unknown error"
         for attempt in range(self._max_retries):
