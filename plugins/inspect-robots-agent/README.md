@@ -276,7 +276,7 @@ be distinguishable, encode it in a named factory's qualname, for example
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
+`wire`, `speed`, `service_tier`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `max_retries` (default `3`, counting total attempts), `backoff_s` (default `1.0`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
 (default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
@@ -300,6 +300,24 @@ inspect-robots "pick up the cube" --policy agent \
 
 The effective retry settings are recorded in `EvalSpec.policy_config` so a
 run can be reproduced from its log.
+
+`service_tier` applies to `-P wire=responses` only. Accepted values are
+`auto`, `default`, `flex`, `priority`, and `fast`. Leave it unset (or pass
+`-P service_tier=none`) to omit the request field and retain the project's
+default. `default` explicitly requests standard processing. For OpenAI Fast
+mode, add these options to the existing task/embodiment command:
+
+```bash
+-P model=openai/gpt-6-astra -P wire=responses -P effort=medium -P service_tier=fast
+```
+
+OpenAI also accepts `priority` for Fast mode. This setting is independent of
+reasoning effort and robot speed. Model and project eligibility still apply,
+and Fast mode has a per-token premium; see the
+[OpenAI Fast mode guide](https://developers.openai.com/api/docs/guides/fast-mode).
+The requested tier is saved in `policy_config.service_tier`. Wire capture
+preserves the request and provider response, including the actual returned
+`service_tier`, which can differ from the requested tier.
 
 | Image option | Default | Behavior |
 |---|---|---|
@@ -511,6 +529,43 @@ retry or on-demand rejection churn can cause one silent full-prefix rewrite
 and a temporary zero cache-read count. A final nudge also changes wire shape
 once it is superseded. Both are cost blips rather than errors, and the anchor
 normally restores the hit on the next cycle.
+
+## Prompt caching on the Responses wire
+
+For GPT-5.6 and GPT-6 model families, `wire=responses` uses explicit-only
+caching (`prompt_cache_options.mode=explicit`, `ttl=30m`). The harness marks
+initial system/developer instructions, the newest elided-image message,
+and the current tail with `prompt_cache_breakpoint`. Image-ending content uses
+an empty `input_text` block after the final image as the marker location;
+tool-result tails are marked on the final result. The empty block stays in
+translated history even when unmarked, preserving earlier reusable prefixes.
+Original text, images, and their ordering remain unchanged.
+Unsupported tail items are left unmarked, preserving raw assistant and
+reasoning replay. Other model IDs retain the existing request format.
+
+Responses also marks the longest unchanged historical prefix selected on a
+successful request. This supplies an explicit lookup endpoint where the
+Messages wire relies on Anthropic's backward lookup. Coincident endpoints
+are deduplicated; each request has at most four markers. Fingerprints cover
+the full translated prefix and request settings. Failed or incomplete calls
+do not add candidates, and trial reset clears local tracking. A candidate
+means the prefix was submitted, not that the provider cached it.
+
+Messages behavior and the image horizon are unchanged. This matches intended
+reuse, not provider hit rates: retention, cache availability, and minimum
+lengths differ. Responses does not emulate Anthropic's 20-block lookback using
+OpenAI blocks. Image removal invalidates the changed prefix and every later
+endpoint; an earlier unchanged prefix can still be reused.
+
+Check `usage.input_tokens_details.cached_tokens` and `cache_write_tokens`
+in captured Responses payloads to measure reuse. See OpenAI's
+[prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+for the boundary and retention semantics.
+
+OpenRouter strips `prompt_cache_breakpoint` from `input_image` blocks. The
+empty text anchor preserves the boundary after the complete image without
+adding prompt text. Live Astra validation through that route on 2026-09-23
+confirmed that this representation writes and reuses the image-ending prefix.
 
 ## Reasoning effort on OpenAI models
 
