@@ -333,12 +333,12 @@ class LLMAgentPolicy(PolicyBase):
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
         temperature: float | None = None,
-        effort: str | float | None | _Unset = _UNSET,
+        effort: str | float | _Unset | None = _UNSET,
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
         depth: str = "render",
-        image_horizon: int | None | _Unset = _UNSET,
+        image_horizon: int | _Unset | None = _UNSET,
         prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
@@ -803,6 +803,8 @@ class LLMAgentPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
+        if isinstance(self._client, ResponsesClient):
+            self._client._reset_cache_tracking()
         self._hindsight = None
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
@@ -961,7 +963,7 @@ class LLMAgentPolicy(PolicyBase):
                 outgoing = _evicted_view(
                     self._messages,
                     self._image_horizon,
-                    mark_anchor=isinstance(self._client, AnthropicClient),
+                    mark_anchor=isinstance(self._client, (AnthropicClient, ResponsesClient)),
                 )
             message = self._client.complete(
                 outgoing,

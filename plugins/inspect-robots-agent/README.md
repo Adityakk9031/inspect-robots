@@ -514,6 +514,43 @@ and a temporary zero cache-read count. A final nudge also changes wire shape
 once it is superseded. Both are cost blips rather than errors, and the anchor
 normally restores the hit on the next cycle.
 
+## Prompt caching on the Responses wire
+
+For GPT-5.6 and GPT-6 model families, `wire=responses` uses explicit-only
+caching (`prompt_cache_options.mode=explicit`, `ttl=30m`). The harness marks
+initial system/developer instructions, the newest elided-image message,
+and the current tail with `prompt_cache_breakpoint`. Image-ending content uses
+an empty `input_text` block after the final image as the marker location;
+tool-result tails are marked on the final result. The empty block stays in
+translated history even when unmarked, preserving earlier reusable prefixes.
+Original text, images, and their ordering remain unchanged.
+Unsupported tail items are left unmarked, preserving raw assistant and
+reasoning replay. Other model IDs retain the existing request format.
+
+Responses also marks the longest unchanged historical prefix selected on a
+successful request. This supplies an explicit lookup endpoint where the
+Messages wire relies on Anthropic's backward lookup. Coincident endpoints
+are deduplicated; each request has at most four markers. Fingerprints cover
+the full translated prefix and request settings. Failed or incomplete calls
+do not add candidates, and trial reset clears local tracking. A candidate
+means the prefix was submitted, not that the provider cached it.
+
+Messages behavior and the image horizon are unchanged. This matches intended
+reuse, not provider hit rates: retention, cache availability, and minimum
+lengths differ. Responses does not emulate Anthropic's 20-block lookback using
+OpenAI blocks. Image removal invalidates the changed prefix and every later
+endpoint; an earlier unchanged prefix can still be reused.
+
+Check `usage.input_tokens_details.cached_tokens` and `cache_write_tokens`
+in captured Responses payloads to measure reuse. See OpenAI's
+[prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+for the boundary and retention semantics.
+
+OpenRouter strips `prompt_cache_breakpoint` from `input_image` blocks. The
+empty text anchor preserves the boundary after the complete image without
+adding prompt text. Live Astra validation through that route on 2026-09-23
+confirmed that this representation writes and reuses the image-ending prefix.
+
 ## Reasoning effort on OpenAI models
 
 Recent OpenAI reasoning models can reject function tools on the Chat

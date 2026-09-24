@@ -497,7 +497,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     script = _WireScript(wire)
     sink = _RecordingSink()
     policy = LLMAgentPolicy(
-        model="test/model",
+        model="openai/gpt-6-astra" if wire == "responses" else "test/model",
         base_url="http://llm.test/v1",
         wire=wire,
         image_horizon=1,
@@ -544,6 +544,18 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
         ]
         assert elision_blocks
         assert elision_blocks[-1]["cache_control"] == {"type": "ephemeral"}
+
+    if wire == "responses":
+        elision_blocks = [
+            block
+            for message in captured_request["input"]
+            if isinstance(message.get("content"), list)
+            for block in message["content"]
+            if "camera frame(s) elided" in block.get("text", "")
+        ]
+        assert elision_blocks
+        assert elision_blocks[-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+        assert captured_request["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
 
 
 def test_zero_llm_call_trial_creates_no_capture_file_or_metadata(tmp_path: Path) -> None:
