@@ -193,7 +193,9 @@ def _git_commit() -> str | None:
         return None
     commit = head.stdout.strip()
     tree = _git("status", "--porcelain")
-    if tree is not None and tree.returncode == 0 and tree.stdout.strip():
+    if tree is None or tree.returncode != 0:
+        return None
+    if tree.stdout.strip():
         commit += "-dirty"
     return commit
 

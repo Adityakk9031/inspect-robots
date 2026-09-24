@@ -1077,6 +1077,16 @@ def test_git_commit_clean_tree_has_no_suffix(monkeypatch: pytest.MonkeyPatch) ->
     assert _git_commit() == "abc123"
 
 
+def test_git_commit_returns_unknown_when_status_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> _FakeCompleted:
+        if "rev-parse" in cmd:
+            return _FakeCompleted("abc123\n")
+        return _FakeCompleted("fatal: index is unreadable\n", returncode=128)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _git_commit() is None
+
+
 # --------------------------------------------------------------------------- #
 # 8. before_scoring hook: the R6 seam for capturing operator judgements.
 # --------------------------------------------------------------------------- #
