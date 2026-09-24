@@ -277,6 +277,7 @@ be distinguishable, encode it in a named factory's qualname, for example
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `service_tier`, `max_output_tokens`, `max_llm_calls` (default `100`),
+`max_retries` (default `3`, counting total attempts), `backoff_s` (default `1.0`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
 (default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
@@ -284,6 +285,21 @@ renders), and `prior_learnings`.
 `speed` and `max_output_tokens` apply to `-P wire=messages` only, and passing
 either on another wire is an error. `speed=fast` is meaningful only for Claude
 on Anthropic's API; Tinker accepts and silently ignores it.
+
+Transient LLM failures use exponential backoff: `backoff_s * 2**attempt`.
+HTTP wires use a valid `Retry-After` header from the provider when one is
+present, including both seconds and HTTP-date values. Invalid headers fall
+back to exponential backoff. The Live wire has no HTTP response header, so it
+always uses the configured exponential delay. For example:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=google/gemini-3.7-flash -P max_retries=8 -P backoff_s=2.0 \
+    --embodiment cubepick
+```
+
+The effective retry settings are recorded in `EvalSpec.policy_config` so a
+run can be reproduced from its log.
 
 `service_tier` applies to `-P wire=responses` only. Accepted values are
 `auto`, `default`, `flex`, `priority`, and `fast`. Leave it unset (or pass

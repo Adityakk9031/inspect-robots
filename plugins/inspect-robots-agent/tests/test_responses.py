@@ -1005,6 +1005,25 @@ def test_transient_http_errors_retry_then_succeed(status_code: int) -> None:
     assert calls == 3
 
 
+def test_retry_after_header_overrides_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("inspect_robots_agent._responses.time.sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"}, text="slow down")
+        return httpx.Response(200, json=_response(_message("ok")))
+
+    _client(handler, backoff_s=1.0).complete(messages=[], tools=[])
+
+    assert sleeps == [7.0]
+
+
 def test_transport_errors_retry_then_succeed() -> None:
     calls = 0
 
@@ -1127,3 +1146,110 @@ def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
     policy = LLMAgentPolicy(model="test/model", base_url="http://llm.test/v1", env={})
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.wire == "chat"
+
+
+@pytest.mark.parametrize(
+    ("wire", "base_url"),
+    [
+        ("chat", "http://llm.test/v1"),
+        ("responses", "http://llm.test/v1"),
+        ("messages", "http://llm.test/v1"),
+        ("gemini-live", "ws://llm.test/v1beta"),
+        ("interactions", "http://llm.test/v1beta"),
+    ],
+)
+def test_policy_forwards_retry_configuration_to_every_wire(
+    wire: str,
+    base_url: str,
+) -> None:
+    policy = LLMAgentPolicy(
+        model="m",
+        base_url=base_url,
+        wire=wire,
+        max_retries=8,
+        backoff_s=2.5,
+        wire_capture=False,
+        env={},
+    )
+
+    assert policy._client._max_retries == 8
+    assert policy._client._backoff_s == 2.5
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.max_retries == 8
+    assert policy.config.backoff_s == 2.5
+
+
+def test_policy_keeps_existing_positional_parameter_order() -> None:
+    policy = LLMAgentPolicy(
+        "m",
+        "http://llm.test/v1",
+        None,
+        "chat",
+        False,
+        None,
+        None,
+        100,
+        0.25,
+        max_retries=8,
+        backoff_s=2.5,
+        env={},
+    )
+
+    assert policy._temperature == 0.25
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.temperature == 0.25
+
+
+def test_policy_config_keeps_existing_positional_field_order() -> None:
+    config = AgentPolicyConfig(
+        1,
+        None,
+        0.25,
+        "m",
+        None,
+        None,
+        "chat",
+        True,
+        None,
+        "flex",
+        None,
+        100,
+        "none",
+        0.1,
+        False,
+        "always",
+        "render",
+        2,
+        None,
+        None,
+        None,
+    )
+
+    assert config.effort == "none"
+    assert config.max_speed_frac == 0.1
+    assert config.pre_check is None
+    assert config.service_tier == "flex"
+    assert config.max_retries == 3
+    assert config.backoff_s == 1.0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_retries": 0},
+        {"max_retries": True},
+        {"backoff_s": -1.0},
+        {"backoff_s": float("inf")},
+        {"backoff_s": float("nan")},
+        {"backoff_s": True},
+    ],
+)
+def test_policy_rejects_invalid_retry_configuration(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ConfigError, match=r"max_retries|backoff_s"):
+        LLMAgentPolicy(
+            model="m",
+            base_url="http://llm.test/v1",
+            wire_capture=False,
+            env={},
+            **kwargs,
+        )
