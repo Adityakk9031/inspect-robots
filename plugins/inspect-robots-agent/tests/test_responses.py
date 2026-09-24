@@ -1211,6 +1211,7 @@ def test_policy_config_keeps_existing_positional_field_order() -> None:
         "chat",
         True,
         None,
+        "flex",
         None,
         100,
         "none",
@@ -1227,7 +1228,7 @@ def test_policy_config_keeps_existing_positional_field_order() -> None:
     assert config.effort == "none"
     assert config.max_speed_frac == 0.1
     assert config.pre_check is None
-    assert config.service_tier is None
+    assert config.service_tier == "flex"
     assert config.max_retries == 3
     assert config.backoff_s == 1.0
 

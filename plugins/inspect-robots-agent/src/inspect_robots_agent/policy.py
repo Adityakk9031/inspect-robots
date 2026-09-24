@@ -274,6 +274,8 @@ class AgentPolicyConfig(PolicyConfig):
     wire: str = "chat"
     wire_capture: bool = True
     speed: str | None = None
+    #: Requested Responses processing tier; None preserves the project default.
+    service_tier: str | None = None
     #: Effective per-response cap on ``wire=messages``; ``None`` on the other
     #: wires, where nothing constrained the output.
     max_output_tokens: int | None = None
@@ -293,8 +295,6 @@ class AgentPolicyConfig(PolicyConfig):
     prior_learnings_sha256: str | None = None
     #: Best-effort module and qualified-name identity of the motion pre-check.
     pre_check: str | None = None
-    #: Requested Responses processing tier; None preserves the project default.
-    service_tier: str | None = None
     max_retries: int = 3
     backoff_s: float = 1.0
 
