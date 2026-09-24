@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin:** Support `service_tier` on the Responses wire, including
+  `-P service_tier=fast` for OpenAI Fast mode, with validation and saved configuration.
+
 - **Core:** Optional `bind_task(envelope)` policy hook called before rollouts with
   the task identity and horizon ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
 

@@ -100,6 +100,7 @@ _MESSAGES_CAPABLE_PREFIXES = frozenset(
     | {prefix for prefix, direct in _DIRECT_PROVIDERS.items() if direct.wire == "messages"}
 )
 _SPEEDS = frozenset({"fast"})
+_SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
 
@@ -272,6 +273,8 @@ class AgentPolicyConfig(PolicyConfig):
     wire: str = "chat"
     wire_capture: bool = True
     speed: str | None = None
+    #: Requested Responses processing tier; None preserves the project default.
+    service_tier: str | None = None
     #: Effective per-response cap on ``wire=messages``; ``None`` on the other
     #: wires, where nothing constrained the output.
     max_output_tokens: int | None = None
@@ -340,6 +343,7 @@ class LLMAgentPolicy(PolicyBase):
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
+        service_tier: str | None = None,
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -348,6 +352,7 @@ class LLMAgentPolicy(PolicyBase):
             ("base_url", base_url),
             ("api_key_env", api_key_env),
             ("speed", speed),
+            ("service_tier", service_tier),
         ]:
             if val is not None and not isinstance(val, str):
                 raise ConfigError(
@@ -456,6 +461,17 @@ class LLMAgentPolicy(PolicyBase):
             )
         if speed is not None and speed not in _SPEEDS:
             raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
+        if service_tier is not None:
+            if service_tier not in _SERVICE_TIERS:
+                raise ConfigError(
+                    f"service_tier must be one of {sorted(_SERVICE_TIERS)}, "
+                    f"or None, got {service_tier!r}"
+                )
+            if wire != "responses":
+                raise ConfigError(
+                    f"service_tier is only supported on wire='responses', got wire={wire!r}.\n"
+                    "fix: pass -P wire=responses, or drop -P service_tier="
+                )
         if images not in _IMAGE_MODES:
             raise ConfigError(
                 f"images must be one of {sorted(_IMAGE_MODES)}, got {images!r}.\n"
@@ -696,7 +712,12 @@ class LLMAgentPolicy(PolicyBase):
                 capture=self._capture,
             )
         elif wire == "responses":
-            self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
+            self._client = ResponsesClient(
+                provider,
+                service_tier=service_tier,
+                transport=transport,
+                capture=self._capture,
+            )
         elif wire == "gemini-live":
             self._client = GeminiLiveClient(provider, capture=self._capture)
         elif wire == "interactions":
@@ -725,6 +746,7 @@ class LLMAgentPolicy(PolicyBase):
             wire=wire,
             wire_capture=wire_capture,
             speed=speed,
+            service_tier=service_tier,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
             effort=resolved_effort,

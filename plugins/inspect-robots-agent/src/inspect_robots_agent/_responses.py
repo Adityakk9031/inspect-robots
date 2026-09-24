@@ -27,6 +27,7 @@ class ResponsesClient:
         self,
         provider: Provider,
         *,
+        service_tier: str | None = None,
         timeout_s: float = 120.0,
         max_retries: int = 3,
         backoff_s: float = 1.0,
@@ -34,6 +35,7 @@ class ResponsesClient:
         capture: WireCapture | None = None,
     ):
         self._provider = provider
+        self._service_tier = service_tier
         # Earlier and unknown models may reject the explicit-breakpoint fields.
         model = provider.model.removeprefix("openai/")
         self._cache_anchors = any(
@@ -83,6 +85,8 @@ class ResponsesClient:
             body["temperature"] = temperature
         if reasoning_effort is not None:
             body["reasoning"] = {"effort": reasoning_effort}
+        if self._service_tier is not None:
+            body["service_tier"] = self._service_tier
         pending_prefixes = self._prepare_cache_reuse(body) if self._cache_anchors else set()
 
         last_error = "unknown error"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -652,6 +653,37 @@ def test_optional_request_fields_are_omitted_when_unset() -> None:
     assert bodies[0]["tools"] == []
     assert "temperature" not in bodies[0]
     assert "reasoning" not in bodies[0]
+    assert "service_tier" not in bodies[0]
+
+
+@pytest.mark.parametrize("service_tier", ["auto", "default", "flex", "priority", "fast"])
+def test_service_tier_is_sent_on_every_retry_and_captured(
+    service_tier: str, tmp_path: Path
+) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(503, json={"error": {"message": "retry"}})
+        return httpx.Response(200, json={**_response(), "service_tier": "default"})
+
+    capture = WireCapture()
+    capture.begin_trial(log_dir=str(tmp_path), run_id="run-1", trial_id="scene-e0")
+    client = _client(handler, service_tier=service_tier, capture=capture, backoff_s=0)
+    try:
+        client.complete(messages=[], tools=[], reasoning_effort="medium")
+    finally:
+        client.close()
+        capture.end_trial()
+
+    assert len(bodies) == 2
+    assert all(body["service_tier"] == service_tier for body in bodies)
+    assert all(body["reasoning"] == {"effort": "medium"} for body in bodies)
+    rows = _wire_rows(tmp_path)
+    assert len(rows) == 2
+    assert all(row["request"]["service_tier"] == service_tier for row in rows)
+    assert rows[-1]["response"]["service_tier"] == "default"
 
 
 @pytest.mark.parametrize("content", [None, ""])
@@ -1023,7 +1055,10 @@ def test_close_closes_underlying_http_client() -> None:
     assert client._http.is_closed
 
 
-def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
+@pytest.mark.parametrize("service_tier", [None, "auto", "default", "flex", "priority", "fast"])
+def test_policy_uses_responses_wire_through_act_and_records_config(
+    service_tier: str | None,
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1034,6 +1069,7 @@ def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
         model="test/model",
         base_url="http://llm.test/v1",
         wire="responses",
+        service_tier=service_tier,
         transport=httpx.MockTransport(handler),
         env={},
     )
@@ -1048,6 +1084,35 @@ def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.wire == "responses"
     assert policy.config.effort is None
+    assert asdict(policy.config)["service_tier"] == service_tier
+    if service_tier is None:
+        assert "service_tier" not in body
+    else:
+        assert body["service_tier"] == service_tier
+
+
+@pytest.mark.parametrize("service_tier", ["", "turbo", "FAST", " fast", 42, True, ["fast"]])
+def test_policy_rejects_invalid_service_tier(service_tier: Any) -> None:
+    with pytest.raises(ConfigError, match="service_tier"):
+        LLMAgentPolicy(
+            model="test/model",
+            base_url="http://llm.test/v1",
+            wire="responses",
+            service_tier=service_tier,
+            env={},
+        )
+
+
+@pytest.mark.parametrize("wire", ["chat", "messages", "anthropic", "gemini-live", "interactions"])
+def test_policy_rejects_service_tier_on_other_wires(wire: str) -> None:
+    with pytest.raises(ConfigError, match="service_tier is only supported on wire='responses'"):
+        LLMAgentPolicy(
+            model="test/model",
+            base_url="http://llm.test/v1",
+            wire=wire,
+            service_tier="fast",
+            env={},
+        )
 
 
 def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:

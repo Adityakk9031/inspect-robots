@@ -276,7 +276,7 @@ be distinguishable, encode it in a named factory's qualname, for example
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
+`wire`, `speed`, `service_tier`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
 (default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
@@ -284,6 +284,24 @@ renders), and `prior_learnings`.
 `speed` and `max_output_tokens` apply to `-P wire=messages` only, and passing
 either on another wire is an error. `speed=fast` is meaningful only for Claude
 on Anthropic's API; Tinker accepts and silently ignores it.
+
+`service_tier` applies to `-P wire=responses` only. Accepted values are
+`auto`, `default`, `flex`, `priority`, and `fast`. Leave it unset (or pass
+`-P service_tier=none`) to omit the request field and retain the project's
+default. `default` explicitly requests standard processing. For OpenAI Fast
+mode, add these options to the existing task/embodiment command:
+
+```bash
+-P model=openai/gpt-6-astra -P wire=responses -P effort=medium -P service_tier=fast
+```
+
+OpenAI also accepts `priority` for Fast mode. This setting is independent of
+reasoning effort and robot speed. Model and project eligibility still apply,
+and Fast mode has a per-token premium; see the
+[OpenAI Fast mode guide](https://developers.openai.com/api/docs/guides/fast-mode).
+The requested tier is saved in `policy_config.service_tier`. Wire capture
+preserves the request and provider response, including the actual returned
+`service_tier`, which can differ from the requested tier.
 
 | Image option | Default | Behavior |
 |---|---|---|
