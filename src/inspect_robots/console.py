@@ -87,8 +87,7 @@ def _stdin_read() -> str | None:
             has_keys = True
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):
-                if msvcrt.kbhit():
-                    msvcrt.getwch()
+                msvcrt.getwch()
                 continue
             if ch == "\r":
                 ch = "\n"

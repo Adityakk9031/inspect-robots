@@ -82,15 +82,14 @@ def _stdin_read_bytes() -> bytes | None:
             has_keys = True
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):
-                if msvcrt.kbhit():
-                    msvcrt.getwch()
+                msvcrt.getwch()
                 continue
             if ch == "\r":
                 ch = "\n"
             chars.append(ch)
         if not chars:
             return None if has_keys else b""
-        return "".join(chars).encode()
+        return "".join(chars).encode("utf-8")
     return os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
 
 
