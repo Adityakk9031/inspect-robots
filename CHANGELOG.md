@@ -9,6 +9,19 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin:** Support `service_tier` on the Responses wire, including
+  `-P service_tier=fast` for OpenAI Fast mode, with validation and saved configuration.
+
+- **Core:** Optional `bind_task(envelope)` policy hook called before rollouts with
+  the task identity and horizon ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
+
+- **Agent plugin (0.27.0):** Surface environment step budget in system prompt and
+  per-observation step count ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
+
+- **Agent plugin (0.27.0):** Configure LLM retry attempts and backoff from the
+  policy, honor provider `Retry-After` delays on HTTP wires, and record the
+  effective settings in evaluation logs ([#441](https://github.com/robocurve/inspect-robots/issues/441)).
+
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
   ([plan 0081](plans/0081-number-slots.md),
@@ -40,11 +53,21 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** Treat a failed Git working-tree status check as unknown provenance
+  instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
+
+- **CaP-X plugin (0.3.1):** Clamp motion targets and interpolated actions to
+  the embodiment action bounds.
+
 - **CLI:** `--epochs N` now overrides only the epoch count. A task declared with
   a non-default reducer (`Epochs(count=5, reducer="pass_at_2")`, `max`, `mode`)
   keeps that reducer under `run --epochs` and `eval-set --epochs`; previously the
   flag silently replaced it with `mean`, so the reported metric was computed with
   the wrong reducer.
+
+- **Agent plugin (0.27.0):** Transcript paths are now sanitised; wire-capture
+  directories are renamed to share the same stem as `transcripts/` and
+  `actions/` ([#370](https://github.com/robocurve/inspect-robots/issues/370)).
 
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
