@@ -216,8 +216,8 @@ def render_index(
     refresh_seconds: int | None = None,
 ) -> str:
     """Return one self-contained HTML document indexing evaluation logs."""
-    dated = sorted([e for e in entries if e.created], key=lambda entry: entry.created, reverse=True)
-    undated = [e for e in entries if not e.created]
+    dated = sorted([e for e in entries if e.created and e.page is not None], key=lambda entry: entry.created, reverse=True)
+    undated = [e for e in entries if not (e.created and e.page is not None)]
     rows = "".join(_row(entry, len(dated) - i) for i, entry in enumerate(dated)) + "".join(
         _row(entry, "-") for entry in undated
     )
@@ -261,11 +261,16 @@ def render_index(
 </main>
 <script>
 const key = "{_FILTER_KEY}", input = document.querySelector("#filter");
+const sortKey = key + "_sort";
 const tbody = document.querySelector("tbody");
 let rows = Array.from(document.querySelectorAll("tbody tr:not(.empty)"));
+
 function applyFilter() {{
   const query = input.value.toLocaleLowerCase();
-  rows.forEach(row => row.hidden = !row.textContent.toLocaleLowerCase().includes(query));
+  rows.forEach(row => {{
+    const text = Array.from(row.children).map(td => td.textContent.trim()).join(" ");
+    row.hidden = !text.toLocaleLowerCase().includes(query);
+  }});
   try {{ localStorage.setItem(key, input.value); }} catch (_) {{}}
 }}
 try {{ input.value = localStorage.getItem(key) || ""; }} catch (_) {{}}
@@ -275,6 +280,45 @@ applyFilter();
 // Header click-to-sort
 const isNum = v => /^-?\\d+(\\.\\d+)?$/.test(v);
 let sortCol = 1, sortAsc = false;
+try {{
+  const saved = localStorage.getItem(sortKey);
+  if (saved) {{
+    const parts = saved.split(",");
+    if (parts.length === 2 && !isNaN(parseInt(parts[0], 10))) {{
+      sortCol = parseInt(parts[0], 10);
+      sortAsc = parts[1] === "1";
+    }}
+  }}
+}} catch (_) {{}}
+
+function applySort() {{
+  document.querySelectorAll("th").forEach(t => {{
+    t.classList.remove("sort-asc", "sort-desc");
+    t.removeAttribute("aria-sort");
+  }});
+  const th = document.querySelector(`th[data-col="${{sortCol}}"]`);
+  if (th) {{
+    th.classList.add(sortAsc ? "sort-asc" : "sort-desc");
+    th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
+  }}
+  rows.sort((a, b) => {{
+    const aCell = a.children[sortCol], bCell = b.children[sortCol];
+    const aVal = aCell ? (aCell.dataset.val || aCell.textContent.trim()) : "";
+    const bVal = bCell ? (bCell.dataset.val || bCell.textContent.trim()) : "";
+    let cmp = 0;
+    if (isNum(aVal) && isNum(bVal)) {{
+      cmp = parseFloat(aVal) - parseFloat(bVal);
+    }} else {{
+      cmp = aVal.localeCompare(bVal);
+    }}
+    return sortAsc ? cmp : -cmp;
+  }});
+  rows.forEach(r => tbody.appendChild(r));
+  try {{ localStorage.setItem(sortKey, sortCol + "," + (sortAsc ? "1" : "0")); }} catch (_) {{}}
+}}
+
+if (rows.length > 0) applySort();
+
 document.querySelectorAll("th[data-col]").forEach(th => {{
   th.addEventListener("click", () => {{
     const col = parseInt(th.dataset.col, 10);
@@ -284,25 +328,7 @@ document.querySelectorAll("th[data-col]").forEach(th => {{
       sortCol = col;
       sortAsc = true;
     }}
-    document.querySelectorAll("th").forEach(t => {{
-      t.classList.remove("sort-asc", "sort-desc");
-      t.removeAttribute("aria-sort");
-    }});
-    th.classList.add(sortAsc ? "sort-asc" : "sort-desc");
-    th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
-    rows.sort((a, b) => {{
-      const aCell = a.children[col], bCell = b.children[col];
-      const aVal = aCell.dataset.val || aCell.textContent.trim();
-      const bVal = bCell.dataset.val || bCell.textContent.trim();
-      let cmp = 0;
-      if (isNum(aVal) && isNum(bVal)) {{
-        cmp = parseFloat(aVal) - parseFloat(bVal);
-      }} else {{
-        cmp = aVal.localeCompare(bVal);
-      }}
-      return sortAsc ? cmp : -cmp;
-    }});
-    rows.forEach(r => tbody.appendChild(r));
+    applySort();
   }});
 }});
 
