@@ -69,7 +69,7 @@ def _prompt_current_device(
 ) -> tuple[str | None, list[str], str]:
     input_fn, prompts = _scripted_input(responses)
     out = io.StringIO()
-    selected, _active_is_by_id = _prompt_device_slot(
+    selected, _active_is_by_id, _ = _prompt_device_slot(
         "inspection camera" if kind == "v4l2" else "left CAN channel",
         kind,
         by_id_devices,
@@ -806,7 +806,7 @@ def test_prompt_device_slot_refuses_typed_ambiguous_by_id_before_duplicate_quest
     input_fn, prompts = _scripted_input([ambiguous_name, "s"])
     out = io.StringIO()
 
-    selected, _active_is_by_id = _prompt_device_slot(
+    selected, _active_is_by_id, _ = _prompt_device_slot(
         "left camera",
         "v4l2",
         by_id_devices,
@@ -843,7 +843,7 @@ def test_prompt_device_slot_refuses_enter_accepted_ambiguous_current(
     input_fn, prompts = _scripted_input(["", "", "s"])
     out = io.StringIO()
 
-    selected, _active_is_by_id = _prompt_device_slot(
+    selected, _active_is_by_id, _ = _prompt_device_slot(
         "top camera",
         "v4l2",
         by_id_devices,
@@ -881,7 +881,7 @@ def test_prompt_device_slot_refuses_enter_accepted_speed_qualified_by_id_current
     input_fn, prompts = _scripted_input(["", "", "s"])
     out = io.StringIO()
 
-    selected, _active_is_by_id = _prompt_device_slot(
+    selected, _active_is_by_id, _ = _prompt_device_slot(
         "top camera",
         "v4l2",
         by_id_devices,
@@ -916,7 +916,7 @@ def test_prompt_device_slot_accepts_ambiguous_camera_by_path_current(
     input_fn, prompts = _scripted_input([""])
     out = io.StringIO()
 
-    selected, _active_is_by_id = _prompt_device_slot(
+    selected, _active_is_by_id, _ = _prompt_device_slot(
         "top camera",
         "v4l2",
         by_id_devices,
@@ -962,7 +962,7 @@ def test_prompt_device_slot_refusal_lists_cross_model_serial_claimants(tmp_path:
     input_fn, _prompts = _scripted_input([ambiguous_name, "s"])
     out = io.StringIO()
 
-    selected, _active_is_by_id = _prompt_device_slot(
+    selected, _active_is_by_id, _ = _prompt_device_slot(
         "top camera",
         "v4l2",
         [],
@@ -1026,7 +1026,7 @@ def test_prompt_device_slot_refusal_deduplicates_claimants_per_camera(tmp_path: 
     input_fn, _prompts = _scripted_input([ambiguous_name, "s"])
     out = io.StringIO()
 
-    selected, _active_is_by_id = _prompt_device_slot(
+    selected, _active_is_by_id, _ = _prompt_device_slot(
         "top camera",
         "v4l2",
         [],
@@ -5235,7 +5235,7 @@ def test_prompt_device_slot_detects_duplicate_across_by_id_and_by_path() -> None
     input_fn, _prompts = _scripted_input([by_path_val, "n", "s"])
     out = io.StringIO()
 
-    res, _ = _prompt_device_slot(
+    res, _, _ = _prompt_device_slot(
         "left camera",
         "v4l2",
         ["/dev/v4l/by-id/usb-Cam_123-video-index0"],
@@ -5291,7 +5291,7 @@ def test_prompt_device_slot_u_rescan_rebuilds_and_reprints_on_row_change() -> No
         identify=lambda _b: "/dev/v4l/by-id/cam1",
         rescan_inventory=lambda: list(inventory),
     )
-    assert "[1] cam1" not in out.getvalue()
+    assert "1. cam1" not in out.getvalue()
 
     # When rescan returns changed rows, rows are rebuilt and listing is reprinted
     new_node = _CameraNode(
@@ -5303,7 +5303,7 @@ def test_prompt_device_slot_u_rescan_rebuilds_and_reprints_on_row_change() -> No
     )
     input_fn, _prompts = _scripted_input(["u"])
     out = io.StringIO()
-    selected, _ = _prompt_device_slot(
+    selected, _, _ = _prompt_device_slot(
         "top camera",
         "v4l2",
         by_id_rows,
@@ -5324,3 +5324,66 @@ def test_prompt_device_slot_u_rescan_rebuilds_and_reprints_on_row_change() -> No
     assert len(by_id_rows) == 2
     assert "/dev/v4l/by-id/cam2" in by_id_rows
     assert "cam2" in out.getvalue()
+
+def test_prompt_device_slot_preserves_physical_identity_across_rescan_replug() -> None:
+    # Test for PR 268 review: "Preserve physical identities for existing assignments before replacing the inventory"
+    from inspect_robots._setup import _prompt_device_slot, _CameraNode
+    import io
+    
+    # Original inventory
+    inventory = [
+        _CameraNode(
+            node="/dev/video0",
+            camera="/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1",
+            serial="SN123",
+            by_id="/dev/v4l/by-id/usb-Cam_123-video-index0",
+            by_path="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0",
+        )
+    ]
+    by_id_dir = Path("/dev/v4l/by-id")
+    by_path_dir = Path("/dev/v4l/by-path")
+    
+    # Already assigned using the by-id name, which physical_id resolves to usb1/1-1
+    assigned = {"top_cam_device": ("v4l2", "top", "/dev/v4l/by-id/usb-Cam_123-video-index0", "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1")}
+    
+    # New inventory after replug: by-id alias is gone, but physical camera node is still usb1/1-1
+    new_inventory = [
+        _CameraNode(
+            node="/dev/video2",
+            camera="/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1",
+            serial="SN123",
+            by_id=None,
+            by_path="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0",
+        )
+    ]
+    
+    # User hits 'u' to rescan, then selects the by-path name of the camera
+    input_fn, _prompts = _scripted_input(["u", "n", "s"])
+    out = io.StringIO()
+    
+    # identify returns the by-path name
+    def identify(_b: bool) -> str:
+        return "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0"
+        
+    res, _, _ = _prompt_device_slot(
+        "left camera",
+        "v4l2",
+        ["/dev/v4l/by-id/usb-Cam_123-video-index0"],
+        ["/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0"],
+        True,
+        by_id_dir,
+        by_path_dir,
+        None,
+        assigned,
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=identify,
+        camera_role="left",
+        rescan_inventory=lambda: new_inventory,
+    )
+    
+    # The duplicate guard should fire because the physical ID is preserved, so it prompts "n" and then skips "s", resulting in None.
+    assert res is None
+    assert "already assigned to the top camera" in out.getvalue()

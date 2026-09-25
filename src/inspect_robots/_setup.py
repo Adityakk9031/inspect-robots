@@ -335,7 +335,7 @@ def _camera_view_state(
         active_is_by_id = bool(by_id_rows) or not by_path_rows
         advertise_path_toggle = len(by_path_rows) > len(by_id_rows)
 
-    if not active_is_by_id and by_id_rows == by_path_rows:
+    if by_id_rows == by_path_rows:
         advertise_path_toggle = False
 
     return active_is_by_id, advertise_path_toggle
@@ -536,7 +536,7 @@ def _prompt_device_slot(
     by_id_dir: Path,
     by_path_dir: Path,
     current: str | None,
-    assigned: dict[str, tuple[str, str, str]],
+    assigned: dict[str, tuple[str, ...]],
     advertise_path_toggle: bool,
     inventory: list[_CameraNode],
     *,
@@ -545,7 +545,7 @@ def _prompt_device_slot(
     identify: Callable[[bool], str | None],
     camera_role: str | None = None,
     rescan_inventory: Callable[[], list[_CameraNode]] | None = None,
-) -> tuple[str | None, bool]:
+) -> tuple[str | None, bool, str]:
     """Prompt for one slot and return its device plus active listing state."""
 
     def physical_id(dev_path: str) -> str:
@@ -575,7 +575,7 @@ def _prompt_device_slot(
         entered = input_fn(prompt).strip()
         selected: str | None = None
         if entered.lower() == "s":
-            return None, active_is_by_id
+            return None, active_is_by_id, ""
         if entered.lower() == "p" and kind == "v4l2":
             active_is_by_id = not active_is_by_id
             devices = by_id_devices if active_is_by_id else by_path_devices
@@ -725,9 +725,9 @@ def _prompt_device_slot(
         sel_id = physical_id(selected)
         other = next(
             (
-                (assigned_label, device)
-                for assigned_kind, assigned_label, device in assigned.values()
-                if assigned_kind == kind and physical_id(device) == sel_id
+                (val[1], val[2])
+                for val in assigned.values()
+                if val[0] == kind and (val[3] if len(val) >= 4 else physical_id(val[2])) == sel_id
             ),
             None,
         )
@@ -754,7 +754,7 @@ def _prompt_device_slot(
                 out=out,
             ):
                 continue
-        return selected, active_is_by_id
+        return selected, active_is_by_id, sel_id
 
 
 def _camera_section(
@@ -796,10 +796,10 @@ def _camera_section(
 
     while True:
         assignments: dict[str, str] = {}
-        assigned_devices: dict[str, tuple[str, str, str]] = {}
+        assigned_devices: dict[str, tuple[str, str, str, str]] = {}
         for role in CAM_ROLES:
             key = f"{role}_cam_device"
-            selected, active_is_by_id = _prompt_device_slot(
+            selected, active_is_by_id, physical_id = _prompt_device_slot(
                 f"{role} camera",
                 "v4l2",
                 by_id_devices,
@@ -827,7 +827,7 @@ def _camera_section(
             )
             if selected is not None:
                 assignments[key] = selected
-                assigned_devices[key] = ("v4l2", role, selected)
+                assigned_devices[key] = ("v4l2", role, selected, physical_id)
         if len(assignments) in (0, len(CAM_ROLES)):
             return assignments
         print(
@@ -910,7 +910,7 @@ def _device_section(
 
     listed_kinds: set[str] = set()
     assignments: dict[str, str] = {}
-    assigned_devices: dict[str, tuple[str, str, str]] = {}
+    assigned_devices: dict[str, tuple[str, str, str, str]] = {}
 
     def prompt_slot(slot: DeviceSlot) -> None:
         nonlocal active_is_by_id
@@ -971,7 +971,7 @@ def _device_section(
 
             identify = _identify
 
-        selected, active_is_by_id = _prompt_device_slot(
+        selected, active_is_by_id, physical_id = _prompt_device_slot(
             slot.label,
             slot.kind,
             primary_devices,
@@ -992,7 +992,7 @@ def _device_section(
         assigned_devices.pop(slot.arg, None)
         if selected is not None:
             assignments[slot.arg] = selected
-            assigned_devices[slot.arg] = (slot.kind, slot.label, selected)
+            assigned_devices[slot.arg] = (slot.kind, slot.label, selected, physical_id)
 
     for slot in slots:
         prompt_slot(slot)
