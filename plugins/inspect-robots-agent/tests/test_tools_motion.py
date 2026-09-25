@@ -1394,3 +1394,17 @@ def test_toolset_bounds_text_and_pinned_labels_and_give_up_description() -> None
     schemas = toolset.schemas()
     give_up_schema = next(s for s in schemas if s["function"]["name"] == "give_up")
     assert "operators can widen limits between trials" in give_up_schema["function"]["description"]
+
+
+def test_toolset_pinned_labels_displacement_modes() -> None:
+    # Bidirectional, one-sided, and fully pinned displacement dimensions
+    space = Box(
+        shape=(3,),
+        low=np.array([0.0, 0.0, -0.1]),
+        high=np.array([0.0, 0.1, 0.1]),
+        semantics=ActionSemantics(
+            control_mode="eef_delta_pos", dim_labels=("fixed_dim", "one_sided", "movable")
+        ),
+    )
+    toolset = build_toolset(space, ObservationSpace(), control_hz=10.0)
+    assert toolset.pinned_labels == ("fixed_dim",)

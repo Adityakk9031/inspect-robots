@@ -793,8 +793,7 @@ def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
 
 _CUBEPICK_BOUNDS = (
     "\n\nEmbodiment bounds:\n"
-    "Per-dimension bounds: dx: [-0.1, 0.1], dy: [-0.1, 0.1].\n"
-    "Pinned dimensions: dx, dy (fixed; do not attempt to move them)."
+    "Per-dimension bounds: dx: [-0.1, 0.1], dy: [-0.1, 0.1]."
 )
 
 

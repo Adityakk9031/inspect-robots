@@ -140,11 +140,19 @@ class Toolset:
 
     @property
     def pinned_labels(self) -> tuple[str, ...]:
-        """Dimensions fixed/pinned where step limits are 0."""
+        """Dimensions fixed/pinned where movement is prohibited."""
+        if self._absolute:
+            return tuple(
+                label
+                for label, limit in zip(self._labels, self._step_limits, strict=True)
+                if limit == 0
+            )
         return tuple(
             label
-            for label, limit in zip(self._labels, self._step_limits, strict=True)
-            if limit == 0
+            for label, pos, neg in zip(
+                self._labels, self._positive_limits, self._negative_limits, strict=True
+            )
+            if pos == 0 and neg == 0
         )
 
     def schemas(self) -> list[dict[str, Any]]:
