@@ -1834,3 +1834,43 @@ def test_hookless_policy_yields_all_none_transcripts(tmp_path: Path) -> None:
 
     (log,) = eval(_task(epochs=2), _HooklessPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert log.samples[0].policy_transcripts == (None, None)
+
+
+def test_eval_set_preserves_stop_raised_during_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots import registry as reg
+
+    policy_close_calls = 0
+
+    class _StopDuringCleanupEmbodiment(CubePickEmbodiment):
+        def close(self) -> None:
+            raise KeyboardInterrupt("stop during embodiment close")
+
+    class _FailingPolicy(ScriptedPolicy):
+        def close(self) -> None:
+            nonlocal policy_close_calls
+            policy_close_calls += 1
+            raise RuntimeError("policy close failed")
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], "stop-during-cleanup", _StopDuringCleanupEmbodiment
+    )
+    monkeypatch.setitem(reg._FACTORIES["policy"], "failing-policy", _FailingPolicy)
+
+    task1 = _task(max_steps=1)
+    task2 = _task(max_steps=1)
+
+    with (
+        pytest.warns(RuntimeWarning, match="preserving KeyboardInterrupt"),
+        pytest.raises(KeyboardInterrupt, match="stop during embodiment close"),
+    ):
+        eval_set(
+            [task1, task2],
+            "failing-policy",
+            "stop-during-cleanup",
+            log_dir=str(tmp_path),
+        )
+
+    assert policy_close_calls == 1

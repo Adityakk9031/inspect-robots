@@ -8236,3 +8236,64 @@ def test_config_show_displays_the_grader_default(
     out = capsys.readouterr().out
     assert "grader" in out
     assert "vlm" in out
+
+
+def test_cli_run_and_eval_set_preserves_cancellation_during_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+
+    from inspect_robots import registry as reg
+    from inspect_robots.mock.cubepick import CubePickEmbodiment
+    from inspect_robots.mock.policies import ScriptedPolicy
+
+    class _StopDuringCleanupEmbodiment(CubePickEmbodiment):
+        def close(self) -> None:
+            raise RuntimeError("embodiment close failed")
+
+    class _FailingPolicy(ScriptedPolicy):
+        def close(self) -> None:
+            raise RuntimeError("policy close failed")
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], "stop-during-cleanup", _StopDuringCleanupEmbodiment
+    )
+    monkeypatch.setitem(reg._FACTORIES["policy"], "failing-policy", _FailingPolicy)
+
+    def _mock_eval(*args: Any, **kwargs: Any) -> Any:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("inspect_robots.eval", _mock_eval)
+    monkeypatch.setattr("inspect_robots.eval_set", lambda *a, **k: _mock_eval())
+
+    import inspect_robots.cli
+
+    ret = inspect_robots.cli.main(
+        [
+            "run",
+            "--instruction",
+            "test",
+            "--policy",
+            "failing-policy",
+            "--embodiment",
+            "stop-during-cleanup",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert ret == 130
+
+    ret2 = inspect_robots.cli.main(
+        [
+            "eval-set",
+            "cubepick-reach",
+            "--policy",
+            "failing-policy",
+            "--embodiment",
+            "stop-during-cleanup",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert ret2 == 130

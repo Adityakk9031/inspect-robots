@@ -434,6 +434,10 @@ def eval(
                     embodiment.close()
                 else:
                     _close_preserving_stop_signal("embodiment", embodiment.close, stop_signal)
+        except BaseException as exc:
+            if isinstance(exc, (SafetyAbort, EmbodimentFault, KeyboardInterrupt)):
+                stop_signal = exc
+            raise
         finally:
             if owns_policy:
                 close_policy = getattr(policy, "close", None)
