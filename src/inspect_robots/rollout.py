@@ -220,12 +220,12 @@ def _non_finite_detail(data: object) -> str | None:
 
 
 def _store_frames(
-    frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation
+    frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation, suffix: str = ""
 ) -> tuple[Observation, Mapping[str, FrameRef] | None]:
     """If a frame store is configured, stream images to disk and strip them."""
     if frame_store is None or not obs.images:
         return obs, None
-    refs = {cam: frame_store.put(trial_id, t, cam, image) for cam, image in obs.images.items()}
+    refs = {cam: frame_store.put(trial_id, t, f"{cam}{suffix}", image) for cam, image in obs.images.items()}
     return replace(obs, images={}), refs
 
 
@@ -353,13 +353,18 @@ def rollout(
                     stacklevel=2,
                 )
 
+        raw_obs = obs
         try:
             obs = _apply_perturber(perturber, obs, record, store, -1)
         except InspectRobotsError as exc:
             _record_failure(record, exc, -1)
             raise
 
-        obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
+        if obs is raw_obs:
+            obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
+        else:
+            _, _ = _store_frames(frame_store, trial_id, 0, raw_obs)
+            obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs, suffix="_perturbed")
         t = 0
         while t < max_steps:
             poll = None
@@ -550,16 +555,20 @@ def rollout(
                 record.truncated = True
                 record.termination_reason = stop_reason
                 break
+            if t >= max_steps:
+                record.truncated = True
+                record.termination_reason = 'max_steps'
+                break
             try:
                 obs = _apply_perturber(perturber, result.observation, record, store, t)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
-            obs_rec = result_obs_rec
-            refs = result_refs
-        else:
-            record.truncated = True
-            record.termination_reason = "max_steps"
+            if obs is result.observation:
+                obs_rec = result_obs_rec
+                refs = result_refs
+            else:
+                obs_rec, refs = _store_frames(frame_store, trial_id, t, obs, suffix='_perturbed')
     except KeyboardInterrupt as exc:
         record.status = "cancelled"
         record.error = "cancelled by user (KeyboardInterrupt)"
