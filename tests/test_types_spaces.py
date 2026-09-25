@@ -82,11 +82,17 @@ def test_box_rejects_inverted_bounds() -> None:
 
 
 @pytest.mark.parametrize(
-    "invalid_shape", [(), (0,), (-1,), (2, 0), (2, -3), (True,), (2.5,), [3], "invalid"]
+    "invalid_shape", [(0,), (-1,), (2, 0), (2, -3), (True,), (2.5,), [3], "invalid"]
 )
 def test_box_rejects_invalid_shapes(invalid_shape: object) -> None:
     with pytest.raises(ValueError, match="Box shape"):
         Box(shape=invalid_shape)  # type: ignore[arg-type]
+
+
+def test_box_scalar_shape() -> None:
+    box = Box(shape=(), low=np.array(0.0), high=np.array(1.0))
+    assert box.shape == ()
+    assert box.dim == 1
 
 
 @pytest.mark.parametrize(
@@ -118,7 +124,6 @@ def test_camera_spec_rejects_invalid_attributes(
         ("", (6,)),
         ("   ", (6,)),
         (123, (6,)),
-        ("joint_pos", ()),
         ("joint_pos", (0,)),
         ("joint_pos", (-1,)),
         ("joint_pos", (2, 0)),
@@ -131,6 +136,12 @@ def test_camera_spec_rejects_invalid_attributes(
 def test_state_field_rejects_invalid_attributes(key: Any, shape: Any) -> None:
     with pytest.raises(ValueError, match="StateField"):
         StateField(key=key, shape=shape)
+
+
+def test_state_field_scalar_shape() -> None:
+    sf = StateField(key="gripper", shape=())
+    assert sf.shape == ()
+    assert sf.key == "gripper"
 
 
 def test_action_semantics_defaults() -> None:

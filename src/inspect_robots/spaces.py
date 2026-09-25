@@ -94,10 +94,8 @@ class Box:
     semantics: ActionSemantics | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.shape, tuple) or not self.shape:
-            raise ValueError(
-                f"Box shape must be a non-empty tuple of positive integers; got {self.shape!r}"
-            )
+        if not isinstance(self.shape, tuple):
+            raise ValueError(f"Box shape must be a tuple of positive integers; got {self.shape!r}")
         for d in self.shape:
             if not isinstance(d, int) or isinstance(d, bool) or d <= 0:
                 raise ValueError(f"Box shape dimensions must be integers > 0; got {self.shape!r}")
@@ -187,9 +185,9 @@ class StateField:
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
             raise ValueError(f"StateField key must be a non-empty string; got {self.key!r}")
-        if not isinstance(self.shape, tuple) or not self.shape:
+        if not isinstance(self.shape, tuple):
             raise ValueError(
-                f"StateField shape must be a non-empty tuple of positive ints; got {self.shape!r}"
+                f"StateField shape must be a tuple of positive ints; got {self.shape!r}"
             )
         for d in self.shape:
             if not isinstance(d, int) or isinstance(d, bool) or d <= 0:
