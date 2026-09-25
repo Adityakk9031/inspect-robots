@@ -34,6 +34,14 @@ def _safe(name: str) -> str:
     return safe
 
 
+def _safe_legacy(name: str) -> str:
+    """Legacy filesystem-safe conversion used by previous runs (pre _SAFE_MAX)."""
+    safe = _SAFE_RE.sub("-", name)
+    if safe != name:
+        safe = f"{safe}-{zlib.crc32(name.encode()) & 0xFFFFFFFF:08x}"
+    return safe
+
+
 @dataclass(frozen=True)
 class FrameRef:
     """A handle to a camera frame stored on disk."""
