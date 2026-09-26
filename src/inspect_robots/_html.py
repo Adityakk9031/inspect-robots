@@ -675,6 +675,7 @@ def _raw_tool_call(name: str, arguments: object) -> str:
 def _load_frame(frame_ctx: _FrameContext, name: str, step: int) -> npt.NDArray[np.uint8] | None:
     """Load one exact-match stored frame, degrading every invalid artifact to ``None``."""
     from inspect_robots.frames import _safe, _safe_legacy
+
     if frame_ctx.budget.truncated:
         return None
     safe_trial = _safe(frame_ctx.trial_id)
@@ -1000,9 +1001,7 @@ def _render_transcript(
 ) -> str:
     """Render chat-shaped records conversationally and all others as bounded JSON."""
     if _is_chat_transcript(transcript):
-        return _render_chat_transcript(
-            cast(list[object], transcript), frame_ctx, trial_id=trial_id
-        )
+        return _render_chat_transcript(cast(list[object], transcript), frame_ctx, trial_id=trial_id)
     # Escaping happens on the dumped text below, so raw non-ASCII is safe and
     # far more readable than \uXXXX escapes.
     dumped = json.dumps(
@@ -1318,6 +1317,7 @@ def _render_trial_wire(
 def _trial_camera_streams(frames_dir: Path, trial_id: str) -> dict[str, list[tuple[int, Path]]]:
     """Enumerate one trial's camera streams by stripping its known filename prefix."""
     from inspect_robots.frames import _safe, _safe_legacy
+
     streams: dict[str, list[tuple[int, Path]]] = {}
 
     safe_trial = _safe(trial_id)
@@ -1356,6 +1356,7 @@ def _render_trial_media(
     for camera, step in rendered_frames:
         flipbook.setdefault(camera, []).append(step)
     from inspect_robots.frames import _safe, _safe_legacy
+
     display_names = {_safe(camera): camera for camera in flipbook}
     display_names.update({_safe_legacy(camera): camera for camera in flipbook})
 
