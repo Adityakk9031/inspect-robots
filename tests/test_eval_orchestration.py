@@ -1919,4 +1919,3 @@ def test_policy_base_bind_task_noop() -> None:
 
     pol = _ConcretePolicy()
     pol.bind_task(TaskEnvelope(name="t", max_steps=10))
-
