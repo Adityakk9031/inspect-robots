@@ -1264,6 +1264,16 @@ def test_git_commit_clean_tree_has_no_suffix(monkeypatch: pytest.MonkeyPatch) ->
     assert _git_commit() == "abc123"
 
 
+def test_git_commit_returns_unknown_when_status_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> _FakeCompleted:
+        if "rev-parse" in cmd:
+            return _FakeCompleted("abc123\n")
+        return _FakeCompleted("fatal: index is unreadable\n", returncode=128)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _git_commit() is None
+
+
 # --------------------------------------------------------------------------- #
 # 8. before_scoring hook: the R6 seam for capturing operator judgements.
 # --------------------------------------------------------------------------- #
@@ -1874,3 +1884,39 @@ def test_eval_set_preserves_stop_raised_during_cleanup(
         )
 
     assert policy_close_calls == 1
+
+
+def test_policy_bind_task_hook_receives_task_envelope(tmp_path: Path) -> None:
+    class _TaskAwarePolicy:
+        def __init__(self) -> None:
+            self._delegate = ScriptedPolicy()
+            self.info = self._delegate.info
+            self.config = self._delegate.config
+            self.bound_envelope: object = None
+
+        def bind_task(self, envelope: object) -> None:
+            self.bound_envelope = envelope
+
+        def reset(self, scene: Scene) -> None:
+            self._delegate.reset(scene)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return self._delegate.act(observation)
+
+    pol = _TaskAwarePolicy()
+    eval(_task(max_steps=42), pol, CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert pol.bound_envelope is not None
+    assert getattr(pol.bound_envelope, "max_steps", None) == 42
+
+
+def test_policy_base_bind_task_noop() -> None:
+    from inspect_robots.policy import PolicyBase
+    from inspect_robots.task import TaskEnvelope
+
+    class _ConcretePolicy(PolicyBase):
+        def act(self, observation: Observation) -> ActionChunk:
+            raise NotImplementedError
+
+    pol = _ConcretePolicy()
+    pol.bind_task(TaskEnvelope(name="t", max_steps=10))
+

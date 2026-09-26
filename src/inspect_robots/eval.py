@@ -214,7 +214,9 @@ def _git_commit() -> str | None:
         return None
     commit = head.stdout.strip()
     tree = _git("status", "--porcelain")
-    if tree is not None and tree.returncode == 0 and tree.stdout.strip():
+    if tree is None or tree.returncode != 0:
+        return None
+    if tree.stdout.strip():
         commit += "-dirty"
     return commit
 
@@ -495,6 +497,11 @@ def _run_eval(
     bind_task = getattr(embodiment, "bind_task", None)
     if callable(bind_task):
         bind_task(task_envelope)
+
+    # Horizon-aware policies (plan 0013 anticipated this): optional bind_task() hook
+    policy_bind_task = getattr(policy, "bind_task", None)
+    if callable(policy_bind_task):
+        policy_bind_task(task_envelope)
 
     epoch_spec = task.epoch_spec
     scorers = task.scorers
