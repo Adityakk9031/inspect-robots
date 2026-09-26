@@ -1022,23 +1022,29 @@ def test_rollout_rejects_invalid_max_steps(invalid_steps: Any) -> None:
             sink=NullSink(),
         )
 
+
 def test_auto_perturber_after_exhausted_budget() -> None:
     class _FailingPerturber:
         def __init__(self) -> None:
             self.calls = 0
+
         def perturb(self, obs: Observation, store: dict[str, object]) -> Observation:
             self.calls += 1
             if self.calls > 1:
                 raise SafetyAbort("perturber failed on second call")
             return obs
 
-    record = _run(ScriptedPolicy(), CubePickEmbodiment(), perturber=_FailingPerturber(), max_steps=1)
+    record = _run(
+        ScriptedPolicy(), CubePickEmbodiment(), perturber=_FailingPerturber(), max_steps=1
+    )
     assert record.status == "success"
     assert record.truncated is True
     assert record.termination_reason == "max_steps"
 
+
 def test_multistep_recording_fidelity_with_and_without_framestore(tmp_path: Path) -> None:
     from dataclasses import replace
+
     class _ImagePerturber:
         def perturb(self, obs: Observation, store: dict[str, object]) -> Observation:
             new_images = {}
@@ -1046,19 +1052,25 @@ def test_multistep_recording_fidelity_with_and_without_framestore(tmp_path: Path
                 new_img = np.ones_like(img) * 128
                 new_images[cam] = new_img
             return replace(obs, images=new_images)
-            
+
     policy = ScriptedPolicy()
-    
+
     # Without FrameStore
     record1 = _run(policy, CubePickEmbodiment(), perturber=_ImagePerturber(), max_steps=2)
     assert record1.status == "success"
     assert record1.steps[0].observation.images["top"][0, 0, 0] == 128
     assert record1.steps[0].result.observation.images["top"][0, 0, 0] == 0  # original is 0
     assert record1.steps[1].observation.images["top"][0, 0, 0] == 128
-    
+
     # With FrameStore
     frame_store = FrameStore(str(tmp_path / "frames"))
-    record2 = _run(policy, CubePickEmbodiment(), perturber=_ImagePerturber(), max_steps=2, frame_store=frame_store)
+    record2 = _run(
+        policy,
+        CubePickEmbodiment(),
+        perturber=_ImagePerturber(),
+        max_steps=2,
+        frame_store=frame_store,
+    )
     assert record2.status == "success"
     assert not record2.steps[0].observation.images
     assert record2.steps[0].image_refs is not None

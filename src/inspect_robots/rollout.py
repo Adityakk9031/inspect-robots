@@ -225,7 +225,10 @@ def _store_frames(
     """If a frame store is configured, stream images to disk and strip them."""
     if frame_store is None or not obs.images:
         return obs, None
-    refs = {cam: frame_store.put(trial_id, t, f"{cam}{suffix}", image) for cam, image in obs.images.items()}
+    refs = {
+        cam: frame_store.put(trial_id, t, f"{cam}{suffix}", image)
+        for cam, image in obs.images.items()
+    }
     return replace(obs, images={}), refs
 
 
@@ -366,7 +369,7 @@ def rollout(
             _, _ = _store_frames(frame_store, trial_id, 0, raw_obs)
             obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs, suffix="_perturbed")
         t = 0
-        while t < max_steps:
+        while True:
             poll = None
             if operator_input is not None and console_ok:
                 try:
@@ -557,7 +560,7 @@ def rollout(
                 break
             if t >= max_steps:
                 record.truncated = True
-                record.termination_reason = 'max_steps'
+                record.termination_reason = "max_steps"
                 break
             try:
                 obs = _apply_perturber(perturber, result.observation, record, store, t)
@@ -568,7 +571,7 @@ def rollout(
                 obs_rec = result_obs_rec
                 refs = result_refs
             else:
-                obs_rec, refs = _store_frames(frame_store, trial_id, t, obs, suffix='_perturbed')
+                obs_rec, refs = _store_frames(frame_store, trial_id, t, obs, suffix="_perturbed")
     except KeyboardInterrupt as exc:
         record.status = "cancelled"
         record.error = "cancelled by user (KeyboardInterrupt)"
