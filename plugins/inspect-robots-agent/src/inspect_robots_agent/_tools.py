@@ -133,6 +133,28 @@ class Toolset:
         """Return the state field and per-element labels selected at build time."""
         return self._state_labels
 
+    @property
+    def bounds_text(self) -> str:
+        """Formatted per-dimension bounds text."""
+        return self._bounds_text
+
+    @property
+    def pinned_labels(self) -> tuple[str, ...]:
+        """Dimensions fixed/pinned where movement is prohibited."""
+        if self._absolute:
+            return tuple(
+                label
+                for label, limit in zip(self._labels, self._step_limits, strict=True)
+                if limit == 0
+            )
+        return tuple(
+            label
+            for label, pos, neg in zip(
+                self._labels, self._positive_limits, self._negative_limits, strict=True
+            )
+            if pos == 0 and neg == 0
+        )
+
     def schemas(self) -> list[dict[str, Any]]:
         """Return OpenAI-format tool definitions for this embodiment."""
         if self._absolute and self._pose:
@@ -219,7 +241,11 @@ class Toolset:
             "type": "function",
             "function": {
                 "name": "give_up",
-                "description": "Stop trying; the task cannot be completed. The trial ends.",
+                "description": (
+                    "Stop trying; the task cannot be completed. The trial ends. "
+                    "If a workspace limit is what stops you, say so in your reason: "
+                    "operators can widen limits between trials."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -443,14 +469,14 @@ class Toolset:
                 )
             target[index] = value
 
-        ratios: list[np.float64] = []
+        ratios: list[float] = []
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             for index in named_indices:
                 distance = np.abs(np.subtract(target[index], current[index]))
                 limit = self._step_limits[index]
                 if distance > 0 and limit > 0:
-                    ratios.append(np.divide(distance, limit))
-            ratio = max(ratios, default=np.float64(0.0))
+                    ratios.append(float(np.divide(distance, limit)))
+            ratio = max(ratios, default=0.0)
             headed_ratio = np.divide(ratio, 1.0 - _RELATIVE_HEADROOM)
         if headed_ratio > self._max_steps:
             return self._cap_error()
@@ -478,7 +504,7 @@ class Toolset:
         vector: npt.NDArray[np.float64],
         named_indices: list[int],
     ) -> ToolResult:
-        ratios: list[np.float64] = []
+        ratios: list[float] = []
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             for index in named_indices:
                 value = vector[index]
@@ -489,8 +515,8 @@ class Toolset:
                     return ToolResult(
                         error=f"dimension {self._labels[index]} cannot move in that direction"
                     )
-                ratios.append(np.divide(np.abs(value), limit))
-            ratio = max(ratios, default=np.float64(0.0))
+                ratios.append(float(np.divide(np.abs(value), limit)))
+            ratio = max(ratios, default=0.0)
             headed_ratio = np.divide(ratio, 1.0 - _RELATIVE_HEADROOM)
         if headed_ratio > self._max_steps:
             return self._cap_error()

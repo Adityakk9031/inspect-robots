@@ -208,6 +208,14 @@ def test_rewind_reference_uses_the_limiter_store_key() -> None:
     assert np.array_equal(reference, np.array([0.3, 0.4]))
 
 
+def test_rewind_reference_rejects_non_finite_pose() -> None:
+    store: dict[str, object] = {}
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitApprover.rewind_reference(store, np.array([float("nan"), 0.0]))
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitApprover.rewind_reference(store, np.array([float("inf"), 0.0]))
+
+
 def test_substitution_rewinds_the_next_delta_reference() -> None:
     held = Action(data=np.array([0.0, 0.0]))
 
@@ -372,6 +380,52 @@ def test_displacement_explicit_limit_broadcasts_to_a_multidimensional_box() -> N
     assert out.meta.get("delta_clamped") is True
 
 
+def test_displacement_explicit_multidimensional_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    max_delta = np.array([[0.05, 0.1, 0.15], [0.2, 0.25, 0.3]])
+    approver = DeltaLimitApprover(space, max_delta=max_delta)
+    out = approver.review(Action(data=np.full(shape, 1.0)), {})
+    assert np.allclose(out.data, max_delta)
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_absolute_explicit_multidimensional_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -10.0),
+        high=np.full(shape, 10.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    max_delta = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+    approver = DeltaLimitApprover(space, max_delta=max_delta)
+    store: dict[str, Any] = {}
+    first = Action(data=np.zeros(shape))
+    assert approver.review(first, store) is first
+    second = Action(data=np.full(shape, 5.0))
+    out = approver.review(second, store)
+    assert np.allclose(out.data, max_delta)
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_refuses_unbroadcastable_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    with pytest.raises(ValueError, match="does not broadcast"):
+        DeltaLimitApprover(space, max_delta=np.ones((4, 4)))
+
+
 def test_displacement_derived_default_is_box_alone() -> None:
     approver = DeltaLimitApprover(_delta_space())
     inside = Action(data=np.array([0.1, 1.0]))  # at the box edge: untouched
@@ -400,6 +454,17 @@ def test_nan_raises_safety_abort_in_both_branches() -> None:
         approver = DeltaLimitApprover(space, max_delta=0.1)
         with pytest.raises(SafetyAbort, match="NaN"):
             approver.review(Action(data=np.array([float("nan"), 0.0])), {})
+
+
+@pytest.mark.parametrize("space", [_abs_space(), _delta_space()])
+def test_inf_raises_safety_abort_in_both_branches(space: Box) -> None:
+    approver = DeltaLimitApprover(space, max_delta=0.1)
+    store: dict[str, object] = {}
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([float("inf"), 0.0])), store)
+
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([0.0, float("-inf")])), store)
 
 
 @pytest.mark.parametrize("name", ["", "line\nbreak", "line\rbreak"])
