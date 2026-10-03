@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
 import shlex
@@ -384,11 +385,49 @@ def test_live_view_tip_uses_local_and_headless_variants_with_quoted_log_dir(
     )
     remote = capsys.readouterr().out
     assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --host 0.0.0.0" in remote
-    assert "open http://[2001:db8::10]:8300/" in remote
+
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "192.0.2.2 50123 192.0.2.10 22", "DISPLAY": ":0"},
+    )
+    assert "open http://192.0.2.10:8300/" in capsys.readouterr().out
 
     monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
     cli._announce_live_view(args, resolved, {"SSH_CONNECTION": "malformed"})
     assert "open http://robot-host:8300/" in capsys.readouterr().out
+
+
+def test_live_view_tip_never_points_at_an_ipv6_address_the_ipv4_server_cannot_accept(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The tip pairs its URL with `view --serve --host 0.0.0.0`, and that
+    # ThreadingHTTPServer listens on IPv4 only: an SSH session that arrived
+    # over IPv6 must not be sent to http://[<its IPv6 address>]:8300/.
+    args = cli.build_parser().parse_args(
+        ["run", "--task", "cubepick-reach", "--policy", "agent", "--embodiment", "cubepick"]
+    )
+    resolved = cli._ResolvedComponents(
+        None,
+        "agent",
+        "cli",
+        None,
+        "arm",
+        "cli",
+        None,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "2001:db8::2 50123 2001:db8::10 22", "DISPLAY": ":0"},
+    )
+    remote = capsys.readouterr().out
+    assert "--serve --host 0.0.0.0" in remote
+    assert "2001:db8::10" not in remote
+    assert "open http://robot-host:8300/" in remote
 
 
 @pytest.mark.parametrize("command", ["run", "eval-set"])
@@ -7805,6 +7844,101 @@ def test_doctor_uses_default_embodiment_and_guides_when_unset(
     assert "cubepick" in capsys.readouterr().out
 
 
+def _register_device_embodiment(name: str) -> None:
+    from inspect_robots.conformance import DeviceSlot
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    class _DeviceCubePick(CubePickEmbodiment):
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+            DeviceSlot(arg="wrist_cam", kind="v4l2", label="wrist camera"),
+            DeviceSlot(arg="gripper", kind="serial", label="gripper serial"),
+        )
+
+        def __init__(self, **_kwargs: Any) -> None:
+            super().__init__()
+
+    embodiment_decorator(name)(_DeviceCubePick)
+
+
+def test_doctor_reports_missing_device_paths_together(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_device_embodiment("device-doctor-missing")
+    rc = main(
+        [
+            "doctor",
+            "--embodiment",
+            "device-doctor-missing",
+            "-E",
+            f"wrist_cam={tmp_path / 'no-cam'}",
+            "-E",
+            f"gripper={tmp_path / 'no-serial'}",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[error] device: wrist camera (wrist_cam): v4l2 path" in out
+    assert "[error] device: gripper serial (gripper): serial path" in out
+    assert out.index("device: wrist camera") < out.index("conformant")
+
+
+def test_doctor_passes_when_configured_device_paths_exist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cam = tmp_path / "cam"
+    cam.write_text("", encoding="utf-8")
+    gripper = tmp_path / "gripper"
+    gripper.write_text("", encoding="utf-8")
+    _register_device_embodiment("device-doctor-present")
+    rc = main(
+        [
+            "doctor",
+            "--embodiment",
+            "device-doctor-present",
+            "-E",
+            f"wrist_cam={cam}",
+            "-E",
+            f"gripper={gripper}",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[error] device" not in out
+
+
+def test_doctor_reports_unreadable_device_path_and_continues(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locked = tmp_path / "locked" / "cam0"
+    real_exists = Path.exists
+
+    def failing_exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if self == locked:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", failing_exists)
+    _register_device_embodiment("device-doctor-unreadable")
+    rc = main(
+        [
+            "doctor",
+            "--embodiment",
+            "device-doctor-unreadable",
+            "-E",
+            f"wrist_cam={locked}",
+            "-E",
+            f"gripper={tmp_path / 'no-serial'}",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[error] device: wrist camera (wrist_cam): v4l2 path" in out
+    assert "could not be checked: Permission denied" in out
+    assert "[error] device: gripper serial (gripper): serial path" in out
+    assert out.index("device: gripper serial") < out.index("conformant")
+
+
 def test_doctor_ignores_config_args_for_a_different_embodiment(
     _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -8257,6 +8391,49 @@ def test_config_show_displays_the_grader_default(
     out = capsys.readouterr().out
     assert "grader" in out
     assert "vlm" in out
+
+
+def _survivor_log() -> EvalLog:
+    """A tolerated run in which the only scene errored but one trial survived."""
+    log = _step_limit_log(reasons=("success", None, None))
+    scene = dataclasses.replace(log.samples[0], status="error", error="policy failed")
+    return dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, errored_trials=2),
+        samples=(scene,),
+    )
+
+
+def test_run_summary_warns_when_no_scene_completed_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #440: the status stays success, but the summary must say why to distrust it."""
+    assert _run_with_synthesized_log(_survivor_log(), monkeypatch, tmp_path) == 0
+
+    out = capsys.readouterr().out
+    assert "warning: no scene completed cleanly (2 of 3 trial(s) errored)" in out
+
+
+def test_inspect_warns_when_no_scene_completed_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_survivor_log(), tmp_path, "survivor.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "warning: no scene completed cleanly" in capsys.readouterr().out
+
+
+def test_inspect_does_not_warn_when_a_scene_completed_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(reasons=("success",)), tmp_path, "clean.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "no scene completed cleanly" not in capsys.readouterr().out
 
 
 def test_inspect_and_view_show_abstention_counts_beside_metrics(
