@@ -32,6 +32,7 @@ catch.
 from __future__ import annotations
 
 import configparser
+import math
 import os
 import sys
 from collections.abc import Mapping
@@ -70,7 +71,10 @@ def _parse_value(text: str) -> Any:
         return None
     for caster in (int, float):
         try:
-            return caster(text)
+            val = caster(text)
+            if caster is float and not math.isfinite(val):
+                continue
+            return val
         except ValueError:
             continue
     return text
