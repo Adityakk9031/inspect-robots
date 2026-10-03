@@ -1368,6 +1368,15 @@ def _print_wire_capture(
     _print_wire_call(trials, wire, selected_trial)
 
 
+def _print_survivor_warning(log: EvalLog) -> None:
+    """Flag a successful run whose metrics no clean scene backs (issue #440)."""
+    from inspect_robots.eval import _survivor_warning
+
+    message = _survivor_warning(log)
+    if message is not None:
+        print(_styled(f"warning: {message}", _YELLOW))
+
+
 def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     """Print the compact post-run summary and failure diagnostics."""
     failed = log.status != "success"
@@ -1392,6 +1401,7 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
                 detail = "" if scene.error in (None, log.error) else f": {scene.error}"
                 print(f"  [{_styled(scene.status, _RED)}] {scene.scene_id}{detail}")
     _print_step_limit_notice(log, is_adhoc)
+    _print_survivor_warning(log)
     trials = f"trials: {log.results.total_trials}"
     if errored_count:
         trials += f" ({errored_count} errored)"
@@ -2041,6 +2051,7 @@ def _cmd_inspect(
     if log.results.errored_trials:
         trials += f" ({log.results.errored_trials} errored)"
     print(f"scenes:      {log.results.total_scenes}   {trials}")
+    _print_survivor_warning(log)
     if log.stats.frames_dir is not None:
         from inspect_robots._video import count_frames, resolve_frames_dir
 

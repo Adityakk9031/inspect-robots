@@ -8297,6 +8297,49 @@ def test_config_show_displays_the_grader_default(
     assert "vlm" in out
 
 
+def _survivor_log() -> EvalLog:
+    """A tolerated run in which the only scene errored but one trial survived."""
+    log = _step_limit_log(reasons=("success", None, None))
+    scene = dataclasses.replace(log.samples[0], status="error", error="policy failed")
+    return dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, errored_trials=2),
+        samples=(scene,),
+    )
+
+
+def test_run_summary_warns_when_no_scene_completed_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #440: the status stays success, but the summary must say why to distrust it."""
+    assert _run_with_synthesized_log(_survivor_log(), monkeypatch, tmp_path) == 0
+
+    out = capsys.readouterr().out
+    assert "warning: no scene completed cleanly (2 of 3 trial(s) errored)" in out
+
+
+def test_inspect_warns_when_no_scene_completed_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_survivor_log(), tmp_path, "survivor.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "warning: no scene completed cleanly" in capsys.readouterr().out
+
+
+def test_inspect_does_not_warn_when_a_scene_completed_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(reasons=("success",)), tmp_path, "clean.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "no scene completed cleanly" not in capsys.readouterr().out
+
+
 def test_inspect_and_view_show_abstention_counts_beside_metrics(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
