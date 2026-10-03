@@ -2104,3 +2104,57 @@ def test_legacy_uncapped_frame_paths_load_successfully(tmp_path: Path) -> None:
     html = render_html(log, title="legacy", frames_dir=tmp_path)
 
     assert "data:image/png" in html
+
+
+def test_safe_exists_handles_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from inspect_robots._html import _safe_exists
+
+    target = tmp_path / "frame.npy"
+    assert not _safe_exists(target)
+    target.touch()
+    assert _safe_exists(target)
+
+    def failing_exists(self: Path) -> bool:
+        raise OSError(36, "File name too long")
+
+    monkeypatch.setattr(Path, "exists", failing_exists)
+    assert not _safe_exists(target)
+
+
+def test_missing_long_name_frame_normal_rendering_degrades_gracefully(tmp_path: Path) -> None:
+    from inspect_robots._html import render_html
+
+    long_scene = "s" * 300
+    long_cam = "c" * 300
+    parts = [
+        {"type": "text", "text": f"camera '{long_cam}' (step 0):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+    log = _frame_log(parts)
+    scene = dataclasses.replace(log.samples[0], scene_id=long_scene)
+    log = dataclasses.replace(log, samples=(scene,))
+    html = render_html(log, title="normal missing", frames_dir=tmp_path)
+    assert "[image omitted: streamed camera frame]" in html
+    assert "data:image/png" not in html
+
+
+def test_missing_long_name_frame_live_rendering_degrades_gracefully(tmp_path: Path) -> None:
+    from inspect_robots._html import render_html
+
+    long_scene = "s" * 300
+    long_cam = "c" * 300
+    parts = [
+        {"type": "text", "text": f"camera '{long_cam}' (step 0):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+    log = _frame_log(parts)
+    scene = dataclasses.replace(log.samples[0], scene_id=long_scene)
+    log = dataclasses.replace(log, samples=(scene,))
+    html = render_html(
+        log,
+        title="live missing",
+        frames_dir=tmp_path,
+        live_frames_budget_bytes=100_000,
+    )
+    assert "[image omitted: streamed camera frame]" in html
+    assert "data:image/png" not in html

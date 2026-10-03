@@ -672,6 +672,14 @@ def _raw_tool_call(name: str, arguments: object) -> str:
     return f'<div class="call">{_escape(name)}({_escape(shown)})</div>'
 
 
+def _safe_exists(path: Path) -> bool:
+    """Return whether ``path`` exists, treating OS errors like filename overflow as missing."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _load_frame(frame_ctx: _FrameContext, name: str, step: int) -> npt.NDArray[np.uint8] | None:
     """Load one exact-match stored frame, degrading every invalid artifact to ``None``."""
     from inspect_robots.frames import _safe, _safe_legacy
@@ -681,12 +689,12 @@ def _load_frame(frame_ctx: _FrameContext, name: str, step: int) -> npt.NDArray[n
     safe_trial = _safe(frame_ctx.trial_id)
     safe_name = _safe(name)
     path = frame_ctx.frames_dir / f"{safe_trial}_{safe_name}_{step:06d}.npy"
-    if not path.exists():
+    if not _safe_exists(path):
         legacy_trial = _safe_legacy(frame_ctx.trial_id)
         legacy_name = _safe_legacy(name)
         if legacy_trial != safe_trial or legacy_name != safe_name:
             path = frame_ctx.frames_dir / f"{legacy_trial}_{legacy_name}_{step:06d}.npy"
-    if not path.exists():
+    if not _safe_exists(path):
         return None
     try:
         array = cast("npt.NDArray[Any]", np.load(path, allow_pickle=False))
