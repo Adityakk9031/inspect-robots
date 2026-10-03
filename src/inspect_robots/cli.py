@@ -1368,6 +1368,15 @@ def _print_wire_capture(
     _print_wire_call(trials, wire, selected_trial)
 
 
+def _print_survivor_warning(log: EvalLog) -> None:
+    """Flag a successful run whose metrics no clean scene backs (issue #440)."""
+    from inspect_robots.eval import _survivor_warning
+
+    message = _survivor_warning(log)
+    if message is not None:
+        print(_styled(f"warning: {message}", _YELLOW))
+
+
 def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     """Print the compact post-run summary and failure diagnostics."""
     failed = log.status != "success"
@@ -1392,6 +1401,7 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
                 detail = "" if scene.error in (None, log.error) else f": {scene.error}"
                 print(f"  [{_styled(scene.status, _RED)}] {scene.scene_id}{detail}")
     _print_step_limit_notice(log, is_adhoc)
+    _print_survivor_warning(log)
     trials = f"trials: {log.results.total_trials}"
     if errored_count:
         trials += f" ({errored_count} errored)"
@@ -1585,9 +1595,11 @@ def _announce_live_view(
     url = ""
     if headless:
         fields = env.get("SSH_CONNECTION", "").split()
-        host = fields[2] if len(fields) == 4 else socket.gethostname()
-        if ":" in host and not (host.startswith("[") and host.endswith("]")):
-            host = f"[{host}]"
+        host = fields[2] if len(fields) == 4 else ""
+        # The suggested `--host 0.0.0.0` server listens on IPv4 only, so an
+        # IPv6 address from SSH_CONNECTION would name a URL nothing serves.
+        if not host or ":" in host:
+            host = socket.gethostname()
         url = f"; open http://{host}:8300/"
     print(
         _styled(
@@ -2039,6 +2051,7 @@ def _cmd_inspect(
     if log.results.errored_trials:
         trials += f" ({log.results.errored_trials} errored)"
     print(f"scenes:      {log.results.total_scenes}   {trials}")
+    _print_survivor_warning(log)
     if log.stats.frames_dir is not None:
         from inspect_robots._video import count_frames, resolve_frames_dir
 
@@ -2055,7 +2068,9 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_format_metric(value)}")
+        abstained = log.results.abstentions.get(name, 0)
+        suffix = f" ({abstained} abstained)" if abstained else ""
+        print(f"  {name}: {_format_metric(value)}{suffix}")
     print("scenes:")
     for scene in log.samples:
         reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))

@@ -266,6 +266,25 @@ class _Broadcast:
             s.on_eval_end(log)
 
 
+def _survivor_warning(log: EvalLog) -> str | None:
+    """Describe a "success" whose metrics no clean scene backs, else ``None``.
+
+    ``fail_on_error`` decides whether errored trials fail the run. When it
+    tolerates them yet every scene errored, the metrics rest on whichever
+    trials survived and can look entirely ordinary (issue #440), so callers
+    and readers are warned instead of the status being overridden.
+    """
+    if log.status != "success" or not log.samples:
+        return None
+    if any(scene.status != "error" for scene in log.samples):
+        return None
+    errored, total = log.results.errored_trials, log.results.total_trials
+    return (
+        f"no scene completed cleanly ({errored} of {total} trial(s) errored); "
+        "metrics may rest on a surviving minority of trials"
+    )
+
+
 def eval(
     task: Task | str,
     policy: Policy | str,
@@ -309,7 +328,10 @@ def eval(
     empty entry in ``SceneResult.epochs``.
 
     A run in which **every** trial errored (nothing was scored) always ends
-    with ``status == "error"``, regardless of ``fail_on_error``.
+    with ``status == "error"``, regardless of ``fail_on_error``. A run in which
+    no scene completed cleanly keeps the status ``fail_on_error`` gives it, but
+    emits a ``UserWarning`` (issue #440): its metrics may rest on a surviving
+    minority of trials.
 
     Ctrl-C during a rollout records the partial trial and writes a log with
     ``status == "cancelled"``, then re-raises the interrupt (as a
@@ -524,6 +546,7 @@ def _run_eval(
     error: str | None = None
     error_count = 0
     errored_trials = 0
+    abstentions: dict[str, int] = {}
 
     halted = False
     stopped = False
@@ -534,7 +557,7 @@ def _run_eval(
     planned_trials = len(task.scenes) * epoch_spec.count
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
-        epoch_dicts: list[dict[str, float]] = []
+        epoch_dicts: list[dict[str, float | None]] = []
         judgements: list[str | None] = []
         judgement_sources: list[str | None] = []
         notes: list[str | None] = []
@@ -659,7 +682,7 @@ def _run_eval(
                                             stacklevel=2,
                                         )
                         before_scoring(record, scene)
-                    epoch_values: dict[str, float] = {}
+                    epoch_values: dict[str, float | None] = {}
                     for scorer in scorers:
                         try:
                             score = scorer(record, scene.target)
@@ -683,6 +706,8 @@ def _run_eval(
                             continue
                         per_scorer_scores[scorer.name].append(score)
                         epoch_values[scorer.name] = value
+                        if value is None:
+                            abstentions[scorer.name] = abstentions.get(scorer.name, 0) + 1
                     epoch_dicts.append(epoch_values)
                     # Captured at the same instant as the judgement, on purpose:
                     # these fields are documented as strictly parallel, so a later
@@ -748,7 +773,7 @@ def _run_eval(
                 stopped = True
                 break
 
-        reduced: dict[str, float] = {}
+        reduced: dict[str, float | None] = {}
         for name, scene_scores in per_scorer_scores.items():
             if not scene_scores:
                 continue
@@ -795,11 +820,14 @@ def _run_eval(
         status = "error"
         error = f"all {total_trials} trial(s) errored; nothing was scored"
 
-    metrics: dict[str, float] = {}
+    metrics: dict[str, float | None] = {}
     for scorer in scorers:
         vals = [sr.reduced[scorer.name] for sr in scene_results if scorer.name in sr.reduced]
         if vals:
-            metrics[scorer.name] = mean(vals)
+            # Abstentions carry no verdict, so they are left out of the mean;
+            # a scorer that abstained on every scene reports None, not 0.0.
+            voted = [v for v in vals if v is not None]
+            metrics[scorer.name] = mean(voted) if voted else None
 
     stats = EvalStats(
         started_at=started_iso,
@@ -818,12 +846,16 @@ def _run_eval(
             total_trials=total_trials,
             metrics=metrics,
             errored_trials=errored_trials,
+            abstentions=abstentions,
         ),
         stats=stats,
         samples=tuple(scene_results),
         error=error,
     )
     bus.on_eval_end(log)
+    survivor_warning = _survivor_warning(log)
+    if survivor_warning is not None:
+        warnings.warn(survivor_warning, UserWarning, stacklevel=3)
     if cancelled_exc is not None:
         raise cancelled_exc
     return [log]
