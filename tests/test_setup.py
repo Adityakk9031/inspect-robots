@@ -5426,11 +5426,12 @@ def test_prompt_device_slot_u_rescan_rebuilds_and_reprints_on_row_change() -> No
     assert "/dev/v4l/by-id/cam2" in by_id_rows
     assert "cam2" in out.getvalue()
 
+
 def test_prompt_device_slot_preserves_physical_identity_across_rescan_replug() -> None:
-    # Test for PR 268 review: "Preserve physical identities for existing assignments before replacing the inventory"
-    from inspect_robots._setup import _prompt_device_slot, _CameraNode
     import io
-    
+
+    from inspect_robots._setup import _CameraNode, _prompt_device_slot
+
     # Original inventory
     inventory = [
         _CameraNode(
@@ -5443,33 +5444,35 @@ def test_prompt_device_slot_preserves_physical_identity_across_rescan_replug() -
     ]
     by_id_dir = Path("/dev/v4l/by-id")
     by_path_dir = Path("/dev/v4l/by-path")
-    
+
     # Already assigned using the by-id name, which physical_id resolves to usb1/1-1
-    assigned = {"top_cam_device": ("v4l2", "top", "/dev/v4l/by-id/usb-Cam_123-video-index0", "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1")}
-    
+    cam_sysfs = "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1"
+    by_id_path = "/dev/v4l/by-id/usb-Cam_123-video-index0"
+    assigned = {"top_cam_device": ("v4l2", "top", by_id_path, cam_sysfs)}
+
     # New inventory after replug: by-id alias is gone, but physical camera node is still usb1/1-1
     new_inventory = [
         _CameraNode(
             node="/dev/video2",
-            camera="/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1",
+            camera=cam_sysfs,
             serial="SN123",
             by_id=None,
             by_path="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0",
         )
     ]
-    
+
     # User hits 'u' to rescan, then selects the by-path name of the camera
     input_fn, _prompts = _scripted_input(["u", "n", "s"])
     out = io.StringIO()
-    
+
     # identify returns the by-path name
     def identify(_b: bool) -> str:
         return "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0"
-        
+
     res, _, _ = _prompt_device_slot(
         "left camera",
         "v4l2",
-        ["/dev/v4l/by-id/usb-Cam_123-video-index0"],
+        [by_id_path],
         ["/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0"],
         True,
         by_id_dir,
@@ -5484,7 +5487,7 @@ def test_prompt_device_slot_preserves_physical_identity_across_rescan_replug() -
         camera_role="left",
         rescan_inventory=lambda: new_inventory,
     )
-    
-    # The duplicate guard should fire because the physical ID is preserved, so it prompts "n" and then skips "s", resulting in None.
+
+    # The duplicate guard fires because physical ID was preserved across rescan
     assert res is None
     assert "already assigned to the top camera" in out.getvalue()

@@ -537,7 +537,7 @@ def _prompt_device_slot(
     by_id_dir: Path,
     by_path_dir: Path,
     current: str | None,
-    assigned: dict[str, tuple[str, ...]],
+    assigned: Mapping[str, tuple[str, ...]],
     advertise_path_toggle: bool,
     inventory: list[_CameraNode],
     *,
