@@ -1078,3 +1078,55 @@ def test_multistep_recording_fidelity_with_and_without_framestore(tmp_path: Path
     assert not record2.steps[0].result.observation.images
     assert record2.steps[0].result_image_refs is not None
     assert "_perturbed" not in record2.steps[0].result_image_refs["top"].path
+
+
+def test_perturber_frame_store_separates_raw_and_transformed_namespaces(tmp_path: Path) -> None:
+    """Ensure raw and transformed frames remain distinct even with colliding camera names."""
+    from dataclasses import replace
+
+    from inspect_robots import StepResult
+
+    class _DualCameraEmbodiment(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            obs = super().reset(scene, seed=seed)
+            images = dict(obs.images)
+            images["top"] = np.full((8, 8, 3), 17, dtype=np.uint8)
+            images["top_perturbed"] = np.full((8, 8, 3), 42, dtype=np.uint8)
+            return replace(obs, images=images)
+
+        def step(self, action: Action) -> StepResult:
+            res = super().step(action)
+            images = dict(res.observation.images)
+            images["top"] = np.full((8, 8, 3), 17, dtype=np.uint8)
+            images["top_perturbed"] = np.full((8, 8, 3), 42, dtype=np.uint8)
+            return replace(res, observation=replace(res.observation, images=images))
+
+    class _TopOnlyPerturber:
+        def perturb(self, obs: Observation, store: dict[str, Any]) -> Observation:
+            images = dict(obs.images)
+            if "top" in images:
+                images["top"] = np.full((8, 8, 3), 128, dtype=np.uint8)
+            return replace(obs, images=images)
+
+    frame_store = FrameStore(str(tmp_path / "frames"))
+    record = _run(
+        ScriptedPolicy(),
+        _DualCameraEmbodiment(),
+        perturber=_TopOnlyPerturber(),
+        max_steps=2,
+        frame_store=frame_store,
+    )
+    assert record.status == "success"
+    step0 = record.steps[0]
+    assert step0.image_refs is not None
+    assert step0.result_image_refs is not None
+
+    # FrameRef.camera must preserve original camera name
+    assert step0.image_refs["top"].camera == "top"
+    assert step0.image_refs["top_perturbed"].camera == "top_perturbed"
+
+    # Reloading arrays from disk must yield non-corrupted values
+    assert step0.image_refs["top"].load()[0, 0, 0] == 128
+    assert step0.image_refs["top_perturbed"].load()[0, 0, 0] == 42
+    assert step0.result_image_refs["top"].load()[0, 0, 0] == 17
+    assert step0.result_image_refs["top_perturbed"].load()[0, 0, 0] == 42

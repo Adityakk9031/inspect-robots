@@ -220,14 +220,19 @@ def _non_finite_detail(data: object) -> str | None:
 
 
 def _store_frames(
-    frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation, suffix: str = ""
+    frame_store: FrameStore | None,
+    trial_id: str,
+    t: int,
+    obs: Observation,
+    *,
+    namespace: str = "",
 ) -> tuple[Observation, Mapping[str, FrameRef] | None]:
     """If a frame store is configured, stream images to disk and strip them."""
     if frame_store is None or not obs.images:
         return obs, None
+    storage_trial_id = f"{trial_id}__{namespace}" if namespace else trial_id
     refs = {
-        cam: frame_store.put(trial_id, t, f"{cam}{suffix}", image)
-        for cam, image in obs.images.items()
+        cam: frame_store.put(storage_trial_id, t, cam, image) for cam, image in obs.images.items()
     }
     return replace(obs, images={}), refs
 
@@ -367,7 +372,7 @@ def rollout(
             obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
         else:
             _, _ = _store_frames(frame_store, trial_id, 0, raw_obs)
-            obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs, suffix="_perturbed")
+            obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs, namespace="perturbed")
         t = 0
         while True:
             poll = None
@@ -571,7 +576,7 @@ def rollout(
                 obs_rec = result_obs_rec
                 refs = result_refs
             else:
-                obs_rec, refs = _store_frames(frame_store, trial_id, t, obs, suffix="_perturbed")
+                obs_rec, refs = _store_frames(frame_store, trial_id, t, obs, namespace="perturbed")
     except KeyboardInterrupt as exc:
         record.status = "cancelled"
         record.error = "cancelled by user (KeyboardInterrupt)"
