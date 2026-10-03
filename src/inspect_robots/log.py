@@ -8,8 +8,8 @@ guarantee enforced by golden tests in a later step).
 Immutability is *shallow*: the dataclasses are frozen and sequence fields are
 tuples, so reassigning a field or mutating the sample list is impossible — but
 dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
-``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``, and
-``SceneResult.scene_metadata``)
+``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info`` /
+``grader_config``, and ``SceneResult.scene_metadata``)
 remain plain mutable dicts, as do the dictionaries inside
 ``SceneResult.operator_messages``. ``SceneResult.policy_transcripts`` entries
 are arbitrary mutable JSON values. Treat a log as read-only; nothing
@@ -71,6 +71,23 @@ class EvalSpec:
     environment_id: str | None = None
     environment_revision: str | None = None
     policy_checkpoint: str | None = None
+    # Appended after ``policy_checkpoint`` so the positional order of every field
+    # that predates them is preserved.
+    # The run's grader by registry name ("operator", "vlm", a plugin's own
+    # name), ``None`` when the run graded nothing. A log written before this
+    # field existed also reads back as ``None``.
+    grader: str | None = None
+    # What actually governed grading, as reported by the grader's optional
+    # ``config`` hook; ``{}`` for a grader that exposes none. Credentials are
+    # never recorded. For the builtin ``vlm`` grader these are resolved
+    # values, not the caller's inputs: the rubric has its default substituted
+    # and any ``rubric_file`` already read, and ``effort`` is the value that
+    # rides each request (``None`` omits ``reasoning_effort`` so the provider
+    # default applies, ``"none"`` asks for the minimum). Its ``rubric`` is the
+    # run-level fallback only — a scene carrying its own
+    # ``metadata["rubric"]`` overrides it for that scene, and that value is
+    # already persisted in ``SceneResult.scene_metadata``.
+    grader_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -92,8 +109,8 @@ class SceneResult:
 
     scene_id: str
     status: str  # "success" | "error" | "cancelled"
-    reduced: dict[str, float] = field(default_factory=dict)
-    epochs: tuple[dict[str, float], ...] = ()
+    reduced: dict[str, float | None] = field(default_factory=dict)
+    epochs: tuple[dict[str, float | None], ...] = ()
     error: str | None = None
     # What the scene asked the policy to do — makes a log self-describing.
     instruction: str | None = None
@@ -132,11 +149,15 @@ class EvalResults:
 
     total_scenes: int
     total_trials: int
-    metrics: dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, float | None] = field(default_factory=dict)
     # Errored trials, which are recorded but never scored (visible per-scene
     # as empty entries in ``SceneResult.epochs``). The default keeps logs
     # written before this field existed readable.
     errored_trials: int = 0
+    # Per scorer, how many trials it abstained on (``Score(value=None)``).
+    # Metrics average only judged trials, so this is the other half of the
+    # denominator. Scorers that never abstained are omitted.
+    abstentions: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
