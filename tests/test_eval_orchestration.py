@@ -512,6 +512,68 @@ def test_scorer_returning_unconvertible_value_degrades_to_error_log(
     assert log.results.total_trials == 1
 
 
+class _AbstainOnEpoch:
+    """Abstains on the listed epochs and reports success on the rest."""
+
+    name = "abstains"
+
+    def __init__(self, epochs: set[int]) -> None:
+        self.epochs = epochs
+
+    def __call__(self, record: TrialRecord, target: object) -> Score:
+        if record.epoch in self.epochs:
+            return Score(value=None, explanation="abstain: no operator verdict recorded")
+        return Score(value=True)
+
+
+def test_abstaining_scorer_records_no_verdict_rather_than_an_error(tmp_path: Path) -> None:
+    # Issue #436: Score(value=None) used to crash value_to_float, which the
+    # scorer guard then turned into an error log.
+    task = _task(epochs=2, scorer=_AbstainOnEpoch({0, 1}))
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert log.error is None
+    scene = log.samples[0]
+    assert scene.status == "success"
+    assert scene.epochs == ({"abstains": None}, {"abstains": None})
+    assert scene.reduced == {"abstains": None}
+    assert log.results.metrics == {"abstains": None}
+    assert log.results.abstentions == {"abstains": 2}
+
+    # The abstention survives the JSON round trip as null, distinct from 0.0
+    # and from an errored trial's empty epoch entry.
+    (written,) = tmp_path.glob("*.json")
+    read_back = read_eval_log(str(written))
+    assert read_back.samples[0].epochs == ({"abstains": None}, {"abstains": None})
+    assert read_back.results.metrics == {"abstains": None}
+    assert read_back.results.abstentions == {"abstains": 2}
+
+
+def test_abstained_epochs_and_scenes_are_left_out_of_the_metric(tmp_path: Path) -> None:
+    class _AbstainOnScene(_AbstainOnEpoch):
+        def __call__(self, record: TrialRecord, target: object) -> Score:
+            if record.scene_id == "s1":
+                return Score(value=None)
+            return super().__call__(record, target)
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id=f"s{i}", instruction="reach", init_seed=i) for i in range(2)],
+        scorer=_AbstainOnScene({1}),
+        max_steps=60,
+        epochs=2,
+    )
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    s0, s1 = log.samples
+    assert s0.epochs == ({"abstains": 1.0}, {"abstains": None})
+    assert s0.reduced == {"abstains": 1.0}  # not 0.5: the abstention is not a failure
+    assert s1.reduced == {"abstains": None}
+    assert log.results.metrics == {"abstains": 1.0}
+    # s0 epoch 1 plus both s1 epochs: the denominator behind the 1.0.
+    assert log.results.abstentions == {"abstains": 3}
+
+
 def test_one_failing_scorer_keeps_the_others(tmp_path: Path) -> None:
     # The guard is per scorer, so a sibling scorer's value for the same trial
     # must survive. Two epochs also drive the repeat-failure path, where the run
@@ -548,7 +610,8 @@ def test_errored_trials_are_not_scored(tmp_path: Path) -> None:
     assert scene.status == "error"  # the failed epoch is visible...
     assert scene.epochs[1] == {}  # ...as an empty (unscored) epoch entry
     # ...but the metric comes from the good epoch only: finite, not inf.
-    assert np.isfinite(log.results.metrics["min_distance_to_goal"])
+    distance = log.results.metrics["min_distance_to_goal"]
+    assert distance is not None and np.isfinite(distance)
     assert log.status == "success"  # data survived: partials stay tolerated
     assert log.results.errored_trials == 1
     assert log.results.total_trials == 2
@@ -571,6 +634,69 @@ def test_all_trials_errored_degrades_to_error_status(tmp_path: Path) -> None:
     assert log.error == "all 1 trial(s) errored; nothing was scored"
     assert log.results.errored_trials == log.results.total_trials == 1
     assert log.results.metrics == {}
+
+
+def test_survivor_minority_across_errored_scenes_warns_but_keeps_status(
+    tmp_path: Path,
+) -> None:
+    # Issue #440: fail_on_error stays the caller's tolerance control, so a run
+    # with no clean scene keeps its status, but the caller must be warned that
+    # its metrics rest on a surviving minority.
+    class _FlakyPolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene) -> None:
+            self._resets += 1
+            if self._resets > 1:
+                raise PolicyError(f"synthetic failure on trial {self._resets}")
+            super().reset(scene)
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=60,
+        epochs=6,
+    )
+    expected = r"no scene completed cleanly \(5 of 6 trial\(s\) errored\)"
+    with pytest.warns(UserWarning, match=expected):
+        (log,) = eval(task, _FlakyPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert log.results.errored_trials == 5
+    assert log.results.total_trials == 6
+    assert log.samples[0].status == "error"
+
+
+def test_partially_errored_run_with_clean_scene_stays_success(
+    tmp_path: Path,
+) -> None:
+    # A fully-errored scene next to a clean scene is partial failure, not
+    # survivor bias: the run stays successful and the bad scene stays visible.
+    class _BoomFirstScenePolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            if scene.id == "s0":
+                raise PolicyError("synthetic failure on s0")
+            super().reset(scene)
+
+    task = Task(
+        name="t",
+        scenes=[
+            Scene(id="s0", instruction="reach", init_seed=0),
+            Scene(id="s1", instruction="reach", init_seed=1),
+        ],
+        scorer=success_at_end(),
+        max_steps=60,
+        epochs=2,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        (log,) = eval(task, _BoomFirstScenePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert [s.status for s in log.samples] == ["error", "success"]
+    assert log.results.errored_trials == 2
+    assert log.results.total_trials == 4
 
 
 def test_halt_error_message_is_not_overwritten_by_all_errored(tmp_path: Path) -> None:
@@ -1692,3 +1818,132 @@ def test_policy_base_bind_task_noop() -> None:
 
     pol = _ConcretePolicy()
     pol.bind_task(TaskEnvelope(name="t", max_steps=10))
+
+
+class _UngradedGrader:
+    """A grader that tries and fails on the listed epochs (plan 0085)."""
+
+    name = "flaky-judge"
+
+    def __init__(self, epochs: set[int], *, also_judge: bool = False) -> None:
+        self.epochs = epochs
+        self.also_judge = also_judge
+
+    def grade(self, record: TrialRecord, scene: Scene) -> None:
+        if record.epoch in self.epochs:
+            record.metadata["grading_error"] = "grading request failed with HTTP 400: nope"
+            if self.also_judge:
+                record.operator_judgement = "success"
+        else:
+            record.operator_judgement = "success"
+
+
+def test_ungraded_trials_abstain_and_fail_the_run_without_stopping(tmp_path: Path) -> None:
+    task = _task(epochs=3, scorer=operator_scorer())
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({1}),
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error == (
+        "1 of 3 trial(s) ungraded: grader failed (grading request failed with HTTP 400: nope)"
+    )
+    assert log.samples[0].epochs == ({"operator": 1.0}, {"operator": None}, {"operator": 1.0})
+    assert log.results.metrics == {"operator": 1.0}
+    assert log.results.abstentions == {"operator": 1}
+    assert log.samples[0].trial_metadata[1]["grading_error"].startswith("grading request failed")
+
+
+def test_a_recorded_judgement_wins_over_a_grading_error(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=2, scorer=operator_scorer()),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({0}, also_judge=True),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
+    assert log.results.abstentions == {}
+
+
+def test_ungraded_count_is_appended_to_a_more_specific_error(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=2, scorer=operator_scorer()),
+        _BoomOnSecondEpochPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({0}),
+        fail_on_error=True,
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "error"
+    assert log.error is not None
+    assert log.error.startswith("fail_on_error threshold exceeded")
+    assert log.error.endswith("; 1 of 1 trial(s) ungraded")
+
+
+def test_pass_at_k_with_partial_abstention_keeps_the_reducer_error(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=Epochs(count=3, reducer="pass_at_2"), scorer=operator_scorer()),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({0, 1}),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "error"
+    assert log.error is not None
+    assert "reducer 'pass_at_2' failed" in log.error
+    assert log.error.endswith("; 2 of 3 trial(s) ungraded")
+
+
+class _RejectingPreflightGrader(_UngradedGrader):
+    """A grader whose preflight rejects, as a misconfigured VLM grader would."""
+
+    def __init__(self) -> None:
+        super().__init__(set())
+        self.preflights = 0
+
+    def preflight(self) -> None:
+        self.preflights += 1
+        raise ConfigError("grading preflight request failed with HTTP 400: bad effort")
+
+
+class _ResetCountingEmbodiment(CubePickEmbodiment):
+    resets = 0
+
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        type(self).resets += 1
+        return super().reset(scene, seed=seed)
+
+
+def test_preflight_rejection_stops_eval_before_any_rollout(tmp_path: Path) -> None:
+    _ResetCountingEmbodiment.resets = 0
+    grader = _RejectingPreflightGrader()
+    with pytest.raises(ConfigError, match="preflight request failed"):
+        eval(
+            _task(scorer=operator_scorer()),
+            ScriptedPolicy(),
+            _ResetCountingEmbodiment(),
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+    assert _ResetCountingEmbodiment.resets == 0
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_preflight_rejection_stops_eval_set_before_the_first_task(tmp_path: Path) -> None:
+    _ResetCountingEmbodiment.resets = 0
+    grader = _RejectingPreflightGrader()
+    with pytest.raises(ConfigError, match="preflight request failed"):
+        eval_set(
+            [_task(scorer=operator_scorer()), _task(scorer=operator_scorer())],
+            ScriptedPolicy(),
+            _ResetCountingEmbodiment(),
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+    assert grader.preflights == 1
+    assert _ResetCountingEmbodiment.resets == 0
