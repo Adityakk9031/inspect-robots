@@ -118,10 +118,6 @@ and are compiled into a new version section at release.
   ([plan 0066](plans/0066-footer-echo-pump.md),
   [#367](https://github.com/robocurve/inspect-robots/issues/367)).
 
-- **Voice plugin (0.5.2):** discard captured microphone blocks during active
-  TTS playback and echo tail hangover when `--speak` and `--voice` run together
-  ([#332](https://github.com/robocurve/inspect-robots/issues/332)).
-
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
   instead of draining it at eval end
   ([plan 0061](plans/0061-speak-operator-end-cut.md),

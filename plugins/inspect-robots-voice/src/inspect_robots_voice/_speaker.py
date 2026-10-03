@@ -41,10 +41,12 @@ class _Playback(Protocol):
     def write(self, samples: npt.NDArray[np.float32], sample_rate: int) -> None: ...
 
     def close(self) -> None: ...
-    
-    def abort(self) -> None: ...
-    
-    def drain(self, cancel: Callable[[], bool] | None = None) -> None: ...
+
+
+def _abort_playback(playback: _Playback) -> None:
+    abort = getattr(playback, "abort", None)
+    if callable(abort):
+        abort()
 
 
 PlaybackFactory = Callable[[], _Playback]
@@ -345,19 +347,21 @@ class SpeakerSink(NullSink):
                 try:
                     for start in range(0, len(gained), chunk_size):
                         if self._stop.is_set():
-                            abort = getattr(playback, "abort", None)
-                            if callable(abort): abort()
+                            _abort_playback(playback)
                             return
                         if self._speech_gen != gen:
-                            abort = getattr(playback, "abort", None)
-                            if callable(abort): abort()
+                            _abort_playback(playback)
                             break
                         playback.write(gained[start : start + chunk_size], sample_rate)
                     if not self._stop.is_set() and self._speech_gen == gen:
                         drain = getattr(playback, "drain", None)
                         if callable(drain):
                             try:
-                                drain(lambda: self._stop.is_set() or self._speech_gen != gen)
+                                drain(
+                                    lambda current_gen=gen: (
+                                        self._stop.is_set() or self._speech_gen != current_gen
+                                    )
+                                )
                             except TypeError:
                                 drain()
                         elif hasattr(playback, "wait_done") and callable(playback.wait_done):
@@ -370,15 +374,13 @@ class SpeakerSink(NullSink):
                         if callable(is_playing):
                             while is_playing():
                                 if self._stop.is_set() or self._speech_gen != gen:
-                                    abort = getattr(playback, "abort", None)
-                                    if callable(abort): abort()
+                                    _abort_playback(playback)
                                     break
                                 time.sleep(0.01)
                         elif getattr(playback, "active", False):
                             while getattr(playback, "active", False):
                                 if self._stop.is_set() or self._speech_gen != gen:
-                                    abort = getattr(playback, "abort", None)
-                                    if callable(abort): abort()
+                                    _abort_playback(playback)
                                     break
                                 time.sleep(0.01)
                 finally:

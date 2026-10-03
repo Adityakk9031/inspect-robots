@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -132,7 +133,7 @@ class _GatedPlayback(_FakePlayback):
 
 def _sink(
     engine: _FakeEngine,
-    playback: _FakePlayback,
+    playback: Any,
     *,
     volume: float = 1.0,
     mode: str = "interrupt",
@@ -820,6 +821,7 @@ def test_speaker_buffered_playback_holds_mute_until_drained() -> None:
     _wait_until(lambda: not _is_playback_active(), timeout=2.0)
     sink.close()
 
+
 def test_interrupted_buffer_aborts_and_keeps_mute_hangover() -> None:
     class _SlowDrainPlayback:
         def __init__(self) -> None:
@@ -831,7 +833,7 @@ def test_interrupted_buffer_aborts_and_keeps_mute_hangover() -> None:
 
         def close(self) -> None:
             pass
-            
+
         def abort(self) -> None:
             self.aborted = True
 
@@ -844,6 +846,7 @@ def test_interrupted_buffer_aborts_and_keeps_mute_hangover() -> None:
                 time.sleep(0.01)
 
     from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+
     engine = _FakeEngine()
     playback = _SlowDrainPlayback()
     sink = _sink(engine, playback)
@@ -854,16 +857,17 @@ def test_interrupted_buffer_aborts_and_keeps_mute_hangover() -> None:
 
     sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "interrupted"}))])
     _wait_until(lambda: len(playback.writes) >= 1)
-    
+
     # Interrupt it by logging another message
     sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "replacement"}))])
-    
+
     # Wait for abort to be called during drain
     _wait_until(lambda: playback.aborted)
-    
+
     # the replacement message should start writing
     _wait_until(lambda: len(playback.writes) > 3)
     sink.close()
+
 
 def test_operator_end_aborts_drain() -> None:
     class _SlowDrainPlayback:
@@ -876,7 +880,7 @@ def test_operator_end_aborts_drain() -> None:
 
         def close(self) -> None:
             pass
-            
+
         def abort(self) -> None:
             self.aborted = True
 
@@ -889,6 +893,7 @@ def test_operator_end_aborts_drain() -> None:
                 time.sleep(0.01)
 
     from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+
     engine = _FakeEngine()
     playback = _SlowDrainPlayback()
     sink = _sink(engine, playback)
@@ -899,9 +904,9 @@ def test_operator_end_aborts_drain() -> None:
 
     sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "end-trial"}))])
     _wait_until(lambda: len(playback.writes) >= 1)
-    
+
     # operator ends the trial
     sink.close()
-    
+
     # it should abort promptly without sleeping the full 1.0s
     assert playback.aborted
