@@ -112,6 +112,11 @@ def _styled(text: str, code: str) -> str:
     return f"\x1b[{code}m{text}\x1b[0m"
 
 
+def _format_metric(value: float | int | None) -> str:
+    """Format numeric metric value or return 'n/a' when None."""
+    return "n/a" if value is None else f"{value:.4g}"
+
+
 _BOLD = "1"
 _BOLD_BRIGHT_MAGENTA = "1;95"
 _DIM = "2"
@@ -262,6 +267,21 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         metavar="D",
         help="per-step change limit for the default guardrails, in the action "
         "space's native units (default: derived from the space's bounds)",
+    )
+    parser.add_argument(
+        "--environment-id",
+        default=None,
+        help="environment identifier recorded in evaluation metadata",
+    )
+    parser.add_argument(
+        "--environment-revision",
+        default=None,
+        help="environment revision or commit hash recorded in evaluation metadata",
+    )
+    parser.add_argument(
+        "--policy-checkpoint",
+        default=None,
+        help="policy model checkpoint path, hash, or revision recorded in evaluation metadata",
     )
 
 
@@ -737,9 +757,12 @@ def _resolve_or_exit(
 def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = False) -> Task:
     """Apply ``--epochs`` with a guided error instead of a raw traceback.
 
-    ``replace()`` reruns ``Task.__post_init__``, which rejects a count below 1
-    via ``ConfigError`` — the same validation-error class ``_resolve_or_exit``
-    already converts to ``SystemExit``.
+    Only the count is overridden: the task's declared epoch reducer (e.g.
+    ``Epochs(count=5, reducer="pass_at_2")``) is carried over, so the flag
+    never silently swaps a benchmark's ``pass_at_k``/``max`` for ``mean``.
+    ``Epochs.__post_init__`` rejects a count below 1 via ``ConfigError`` — the
+    same validation-error class ``_resolve_or_exit`` already converts to
+    ``SystemExit``.
 
     ``attribute_task`` names the offending task, which ``eval-set`` needs to
     say *which* of several tasks rejected the flag; ``run`` has only one.
@@ -749,7 +772,7 @@ def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = Fal
     from inspect_robots.errors import ConfigError
 
     try:
-        return replace(task, epochs=epochs)
+        return replace(task, epochs=replace(task.epoch_spec, count=epochs))
     except ConfigError as exc:
         # `__post_init__` re-validates every field, but the task was already
         # valid and only `epochs` changed — so the epoch-count check is the
@@ -1345,6 +1368,15 @@ def _print_wire_capture(
     _print_wire_call(trials, wire, selected_trial)
 
 
+def _print_survivor_warning(log: EvalLog) -> None:
+    """Flag a successful run whose metrics no clean scene backs (issue #440)."""
+    from inspect_robots.eval import _survivor_warning
+
+    message = _survivor_warning(log)
+    if message is not None:
+        print(_styled(f"warning: {message}", _YELLOW))
+
+
 def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     """Print the compact post-run summary and failure diagnostics."""
     failed = log.status != "success"
@@ -1369,12 +1401,13 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
                 detail = "" if scene.error in (None, log.error) else f": {scene.error}"
                 print(f"  [{_styled(scene.status, _RED)}] {scene.scene_id}{detail}")
     _print_step_limit_notice(log, is_adhoc)
+    _print_survivor_warning(log)
     trials = f"trials: {log.results.total_trials}"
     if errored_count:
         trials += f" ({errored_count} errored)"
     print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+        print(f"  {name}: {_styled(_format_metric(value), _BOLD)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
     # Every run ends with the copy-pasteable read-back command (issue #90):
     # a bare path teaches a first-time user nothing about what to do next.
@@ -1562,9 +1595,11 @@ def _announce_live_view(
     url = ""
     if headless:
         fields = env.get("SSH_CONNECTION", "").split()
-        host = fields[2] if len(fields) == 4 else socket.gethostname()
-        if ":" in host and not (host.startswith("[") and host.endswith("]")):
-            host = f"[{host}]"
+        host = fields[2] if len(fields) == 4 else ""
+        # The suggested `--host 0.0.0.0` server listens on IPv4 only, so an
+        # IPv6 address from SSH_CONNECTION would name a URL nothing serves.
+        if not host or ":" in host:
+            host = socket.gethostname()
         url = f"; open http://{host}:8300/"
     print(
         _styled(
@@ -1788,6 +1823,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ),
                 operator_input=operator_input,
                 grader=grader,
+                environment_id=args.environment_id,
+                environment_revision=args.environment_revision,
+                policy_checkpoint=args.policy_checkpoint,
             )
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
@@ -1843,7 +1881,7 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
     for log in logs:
         ok = log.status == "success"
         metrics = ", ".join(
-            f"{name}={value:.4g}" for name, value in sorted(log.results.metrics.items())
+            f"{name}={_format_metric(value)}" for name, value in sorted(log.results.metrics.items())
         )
         detail = metrics or (log.error or "")
         row = f"  [{_styled(_display_status(log.status), _GREEN if ok else _RED)}] {log.eval.task}"
@@ -1929,6 +1967,9 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 retry_attempts=args.retry_attempts,
                 operator_input=operator_input,
                 grader=grader,
+                environment_id=args.environment_id,
+                environment_revision=args.environment_revision,
+                policy_checkpoint=args.policy_checkpoint,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log
@@ -2010,6 +2051,7 @@ def _cmd_inspect(
     if log.results.errored_trials:
         trials += f" ({log.results.errored_trials} errored)"
     print(f"scenes:      {log.results.total_scenes}   {trials}")
+    _print_survivor_warning(log)
     if log.stats.frames_dir is not None:
         from inspect_robots._video import count_frames, resolve_frames_dir
 
@@ -2026,12 +2068,12 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {'n/a' if value is None else f'{value:.4g}'}")
+        abstained = log.results.abstentions.get(name, 0)
+        suffix = f" ({abstained} abstained)" if abstained else ""
+        print(f"  {name}: {_format_metric(value)}{suffix}")
     print("scenes:")
     for scene in log.samples:
-        reduced = "  ".join(
-            f"{k}={'n/a' if v is None else f'{v:.4g}'}" for k, v in sorted(scene.reduced.items())
-        )
+        reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))
         step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
         details = [reduced] if reduced else []
         if step_limit_count:
@@ -2718,7 +2760,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     Purely declarative — the embodiment is constructed (adapters keep
     constructors hardware-free by convention) but never reset or stepped.
     """
-    from inspect_robots.conformance import check_embodiment, missing_runtime_requirements
+    from inspect_robots.conformance import (
+        check_device_slots,
+        check_embodiment,
+        missing_runtime_requirements,
+    )
     from inspect_robots.registry import registered
 
     defaults = load_defaults(os.environ)
@@ -2730,9 +2776,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     kvs = {**config_kvs, **_parse_kvs(args.embodiment_args)}
     print(f"embodiment: {name} ({source})")
-    missing = missing_runtime_requirements(registered("embodiment").get(name))
+    factory = registered("embodiment").get(name)
+    missing = missing_runtime_requirements(factory)
     for module, remedy in missing.items():
         print(f"  [error] runtime-requirement: {module} missing → {remedy}")
+    # Check before construction so constructor failures do not hide device findings.
+    device_issues = check_device_slots(factory, kvs)
+    for issue in device_issues:
+        print(f"  [{issue.severity}] {issue.code}: {issue.message}")
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
@@ -2741,7 +2792,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(report.summary())
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
-    return 1 if not report.ok or missing else 0
+    return 1 if not report.ok or missing or device_issues else 0
 
 
 def _cmd_setup() -> int:
