@@ -263,7 +263,8 @@ def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
 def test_frame_store_rejects_invalid_step(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     img = np.zeros((2, 2, 3), dtype=np.uint8)
-    for bad in (-1, -10, True, False, "0", 1.5):  # type: ignore[arg-type]
+    bad_steps: tuple[Any, ...] = (-1, -10, True, False, "0", 1.5)
+    for bad in bad_steps:
         with pytest.raises(ValueError, match="step t must be an integer >= 0"):
             store.put("trial1", bad, "cam", img)
 
