@@ -216,7 +216,11 @@ def render_index(
     refresh_seconds: int | None = None,
 ) -> str:
     """Return one self-contained HTML document indexing evaluation logs."""
-    dated = sorted([e for e in entries if e.created and e.page is not None], key=lambda entry: entry.created, reverse=True)
+    dated = sorted(
+        [e for e in entries if e.created and e.page is not None],
+        key=lambda entry: entry.created,
+        reverse=True,
+    )
     undated = [e for e in entries if not (e.created and e.page is not None)]
     rows = "".join(_row(entry, len(dated) - i) for i, entry in enumerate(dated)) + "".join(
         _row(entry, "-") for entry in undated

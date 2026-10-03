@@ -200,16 +200,19 @@ def test_long_error_is_truncated_with_full_escaped_tooltip() -> None:
     assert f'title="failed &lt;badly&gt; &quot;{"x" * 200}"' in document
     assert "…" in document
 
+
 def test_unreadable_entries_omitted_from_numbering_and_sorted_last() -> None:
-    from inspect_robots._html_index import IndexEntry, render_index
     from dataclasses import replace
+
+    from inspect_robots._html_index import IndexEntry, render_index
+
     valid1 = replace(_entry("run1.json"), created="2026-09-01T12:00:00Z", page="run1.html")
     valid2 = replace(_entry("run2.json"), created="2026-09-03T12:00:00Z", page="run2.html")
-    
+
     unreadable = IndexEntry(
         name="corrupt.json",
         page=None,
-        created="2026-09-02T12:00:00Z", # chronologically between valid1 and valid2
+        created="2026-09-02T12:00:00Z",  # chronologically between valid1 and valid2
         instruction="",
         policy="",
         model=None,
@@ -220,34 +223,36 @@ def test_unreadable_entries_omitted_from_numbering_and_sorted_last() -> None:
         termination="",
         error="unreadable",
     )
-    
+
     document = render_index([valid1, valid2, unreadable])
-    
+
     # Valid2 is the newest valid, gets #2 (since there are 2 valid runs).
     # Valid1 is the oldest valid, gets #1.
     # unreadable gets "-"
-    
+
     assert 'href="run2.html"' in document
     assert 'href="run1.html"' in document
-    assert '>#2<' in document # run2 run number
-    assert '>#1<' in document # run1 run number
-    assert '>-<' in document # corrupt.json run number
+    assert ">#2<" in document  # run2 run number
+    assert ">#1<" in document  # run1 run number
+    assert ">-<" in document  # corrupt.json run number
 
     import re
+
     # Extract just the rows (table body)
     tbody_match = re.search(r"<tbody>(.*?)</tbody>", document, re.DOTALL)
     assert tbody_match
     tbody = tbody_match.group(1)
-    
+
     # Unreadable should be at the end since valid runs are sorted by date
     # Valid2 is newest, Valid1 is oldest.
     assert tbody.find("run2.json") < tbody.find("run1.json") < tbody.find("corrupt.json")
 
+
 def test_reload_persistence_and_number_filtering() -> None:
     # Check that the JavaScript handles sort persistence and exact matching
     document = render_index([_entry("run.json")])
-    assert 'localStorage.getItem(sortKey)' in document
+    assert "localStorage.getItem(sortKey)" in document
     assert 'localStorage.setItem(sortKey, sortCol + "," + (sortAsc ? "1" : "0"))' in document
-    
+
     # Text content of the row should be joined by space
     assert 'td.textContent.trim()).join(" ");' in document
