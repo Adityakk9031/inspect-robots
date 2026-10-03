@@ -182,6 +182,16 @@ carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
 generates) wins over all of these for that trial. `-G` without any selected
 grader is an error rather than a silent no-op.
 
+The log records what actually graded the run. `EvalSpec.grader` holds the
+grader's name and `EvalSpec.grader_config` holds its effective configuration,
+so a saved log says which model judged, against which rubric, at which effort.
+The values are the resolved ones: a `rubric_file` is recorded as the text that
+was read from it, an omitted rubric as the default that replaced it, and
+`effort` as the value sent on the wire (`null` when the field was omitted and
+the provider default applied, `"none"` when the minimum was requested). The
+rubric recorded there is the run-level one, since a scene carrying its own is
+already persisted with that scene. The API key is never recorded.
+
 Both pieces persist in config, and the args section is owned by the grader it
 was written for (the same rule as `[policy.args]`):
 
@@ -316,6 +326,14 @@ The result is written to `~/.config/inspect-robots/config.ini`
 that later `inspect-robots config set` edits drop comments from the file.
 The setup command requires an interactive terminal; for scripted
 configuration use `inspect-robots config set`.
+
+For the live Rerun viewer, setup assumes a local desktop on macOS and Windows
+unless an SSH session is detected. On other platforms, or over SSH, it suggests
+`rerun = false` and offers remote-viewing advice when both `DISPLAY` and
+`WAYLAND_DISPLAY` are unset or empty. A forwarded display keeps the viewer
+suggestion enabled. Existing `rerun` settings take precedence, and you can
+override the suggestion at the prompt.
+
 After writing the config, setup lists missing runtime requirements declared by
 the selected registered policy and embodiment, together with their remediation
 commands.
@@ -488,8 +506,17 @@ viewer window is a separate design question from running the set at all.
 
 ## `inspect-robots doctor`
 
-`doctor` reports a registered embodiment's missing declared runtime modules
-before constructing it, then checks its spaces for adapter conformance.
+`doctor` checks the configured embodiment before construction. It reports
+missing declared runtime modules and checks the values written for the
+embodiment's declared device slots. Missing camera or serial paths and
+missing CAN interfaces are reported together. A path that cannot be checked, for
+example because a parent directory is not searchable, is reported as an error
+and the remaining slots are still checked. Device checks validate presence only
+and do not confirm that the device is functioning properly. The command exits
+nonzero if it finds any stale configured device references.
+
+After construction, `doctor` checks the embodiment's spaces for adapter
+conformance.
 
 ```bash
 inspect-robots doctor --embodiment my_arms
