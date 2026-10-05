@@ -281,6 +281,40 @@ def test_stdin_read_windows_extended_key_only_returns_none(monkeypatch: pytest.M
     assert _stdin_read() is None
 
 
+def test_stdin_read_windows_accented_and_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    chars = ["v", "o", "i", "l", "à", "\r", "/", "s", "t", "o", "p", "\r"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read() == "voilà\n/stop\n"
+
+
+def test_stdin_read_windows_surrogate_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    chars = ["\ud83d", "\ude00", "\r"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read() == "\U0001f600\n"
+
+
+def test_stdin_read_windows_split_surrogate_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    chars: list[str] = ["\ud83d"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    # First read has only the high surrogate
+    assert _stdin_read() == ""
+    # Second read delivers the low surrogate + Enter
+    chars.extend(["\ude00", "\r"])
+    assert _stdin_read() == "\U0001f600\n"
+
+
 def test_stdin_read_windows_empty_returns_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_msvcrt = types.ModuleType("msvcrt")
     fake_msvcrt.kbhit = lambda: False  # type: ignore[attr-defined]

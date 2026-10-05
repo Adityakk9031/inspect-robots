@@ -77,7 +77,11 @@ def _stdin_readable() -> bool:
         return False
 
 
+_pending_surrogate: str | None = None
+
+
 def _stdin_read() -> str | None:
+    global _pending_surrogate
     if sys.platform == "win32":  # pragma: no cover
         import msvcrt
 
@@ -86,15 +90,51 @@ def _stdin_read() -> str | None:
         while msvcrt.kbhit():
             has_keys = True
             ch = msvcrt.getwch()
-            if ch in ("\x00", "\xe0"):
-                msvcrt.getwch()
+            # On Windows, special keys emit two wide characters:
+            # either '\x00' or '\xe0' followed by the scan code.
+            # However, '\xe0' (U+00E0 'à') is also a legitimate character.
+            if ch == "\x00":
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
                 continue
+            if ch == "\xe0":
+                if msvcrt.kbhit():
+                    nxt = msvcrt.getwch()
+                    # Windows CRT scan codes for extended keys (arrows, navigation, F11/F12)
+                    if nxt in frozenset("HPKMGOIQRS\x85\x86"):
+                        continue
+                    chars.append(ch)
+                    ch = nxt
+                else:
+                    chars.append(ch)
+                    continue
             if ch == "\r":
                 ch = "\n"
             chars.append(ch)
         if not chars:
             return None if has_keys else ""
-        return "".join(chars)
+        # Assemble UTF-16 surrogate pairs if any, retaining pending surrogate state across reads
+        assembled: list[str] = []
+        for ch in chars:
+            code = ord(ch)
+            if 0xD800 <= code <= 0xDBFF:
+                if _pending_surrogate is not None:
+                    assembled.append(_pending_surrogate)
+                _pending_surrogate = ch
+            elif 0xDC00 <= code <= 0xDFFF:
+                if _pending_surrogate is not None:
+                    assembled.append(
+                        chr(0x10000 + ((ord(_pending_surrogate) - 0xD800) << 10) + (code - 0xDC00))
+                    )
+                    _pending_surrogate = None
+                else:
+                    assembled.append(ch)
+            else:
+                if _pending_surrogate is not None:
+                    assembled.append(_pending_surrogate)
+                    _pending_surrogate = None
+                assembled.append(ch)
+        return "".join(assembled)
     raw = os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
     return raw.decode("utf-8", errors="replace")  # pragma: no cover
 

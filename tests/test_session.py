@@ -2115,6 +2115,46 @@ def test_session_read_bytes_windows_extended_key_only_returns_none(
     assert _stdin_read_bytes() is None
 
 
+def test_session_read_bytes_windows_accented_and_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chars = ["v", "o", "i", "l", "à", "\r", "/", "s", "t", "o", "p", "\r"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() == "voilà\n/stop\n".encode()
+
+
+def test_session_read_bytes_windows_surrogate_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chars = ["\ud83d", "\ude00", "\r"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() == "\U0001f600\n".encode("utf-8")
+
+
+def test_session_read_bytes_windows_split_surrogate_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chars: list[str] = ["\ud83d"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    # First read has only the high surrogate
+    assert _stdin_read_bytes() == b""
+    # Second read delivers the low surrogate + Enter
+    chars.extend(["\ude00", "\r"])
+    assert _stdin_read_bytes() == "\U0001f600\n".encode("utf-8")
+
+
 def test_session_read_bytes_windows_empty_returns_empty_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
