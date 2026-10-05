@@ -279,6 +279,8 @@ def rollout(
     declares the ``"self_paced"`` capability to document that it does (see
     [`Embodiment`][inspect_robots.embodiment.Embodiment]).
     """
+    if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps < 1:
+        raise ValueError(f"max_steps must be an integer >= 1, got {max_steps!r}")
     trial_id = f"{scene.id}-e{epoch}"
     record = TrialRecord(scene_id=scene.id, epoch=epoch, seed=seed)
     record.events.append(reset_event(seed))
@@ -452,7 +454,17 @@ def rollout(
                 store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
-            # Recheck because an approver may mutate the array in place and return it.
+            # Recheck because an approver may mutate the array in place or return a new action.
+            reviewed_dim = int(np.asarray(action.data).size)
+            if reviewed_dim != expected_dim:
+                raise _record_failure(
+                    record,
+                    SafetyAbort(
+                        f"approver {type(approver).__name__} returned a {reviewed_dim}-D "
+                        f"action but embodiment {embodiment.info.name!r} expects {expected_dim}-D"
+                    ),
+                    t,
+                )
             non_finite_detail = _non_finite_detail(action.data)
             if non_finite_detail is not None:
                 raise _record_failure(

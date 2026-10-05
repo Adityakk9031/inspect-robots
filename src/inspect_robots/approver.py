@@ -160,8 +160,11 @@ class DeltaLimitApprover:
     rotation representation cannot be clamped per-dimension, or a displacement
     pose mode carrying a quaternion or rot6d delta (whose identity is not the
     zero vector, so per-dimension clamping distorts it) all raise ``ValueError``.
-    ``NaN`` anywhere in a reviewed action raises
-    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. A modified action is
+    Non-finite values (``NaN`` or ``±inf``) anywhere in a reviewed action raise
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. Unlike ``ClampApprover``
+    (which clamps ``±inf`` to finite box bounds), a delta limiter cannot clamp
+    ``±inf`` into anything meaningful because it has no trustworthy finite bound
+    on the first absolute step. A modified action is
     flagged ``meta["delta_clamped"]``; an unmodified one is returned as the
     same object (rollout detects modification by identity). The reference
     lives in the rollout ``store`` (fresh per trial) under a namespaced key.
@@ -253,14 +256,22 @@ class DeltaLimitApprover:
         the limiter measures subsequent deltas from the pose that actually ran.
         If the limiter has not established a reference, this is a no-op.
         """
+        if not bool(np.all(np.isfinite(pose))):
+            raise ValueError(
+                "DeltaLimitApprover: rewind_reference received a non-finite pose; "
+                "refusing to corrupt reference state"
+            )
         if _LAST_APPROVED_KEY in store:
             store[_LAST_APPROVED_KEY] = pose.copy()
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Limit per-step change, retaining absolute-mode history in trial state."""
         data = np.asarray(action.data, dtype=np.float64)
-        if bool(np.isnan(data).any()):
-            raise SafetyAbort("DeltaLimitApprover: action contains NaN; refusing to pass it on")
+        if not bool(np.all(np.isfinite(data))):
+            raise SafetyAbort(
+                "DeltaLimitApprover: action contains a non-finite value (NaN or ±inf); "
+                "refusing to pass it on"
+            )
         if self._absolute:
             reference = store.get(_LAST_APPROVED_KEY)
             if reference is None:
@@ -279,12 +290,16 @@ class DeltaLimitApprover:
 def _validate_max_delta(
     max_delta: float | Any, shape: tuple[int, ...], dim: int
 ) -> npt.NDArray[np.float64]:
+    raw = np.asarray(max_delta, dtype=np.float64)
     try:
-        arr = np.broadcast_to(np.asarray(max_delta, dtype=np.float64), (dim,))
-    except ValueError as exc:
-        raise ValueError(
-            f"DeltaLimitApprover: max_delta does not broadcast to {dim} dimensions"
-        ) from exc
+        arr = np.broadcast_to(raw, shape)
+    except ValueError:
+        try:
+            arr = np.broadcast_to(raw, (dim,)).reshape(shape)
+        except ValueError as exc:
+            raise ValueError(
+                f"DeltaLimitApprover: max_delta does not broadcast to {shape} (or {dim} dimensions)"
+            ) from exc
     if not bool(np.all(np.isfinite(arr))) or bool(np.any(arr <= 0)):
         raise ValueError("DeltaLimitApprover: max_delta must be finite and > 0")
     # Shaped like the box for the same reason the derived default is: review()
@@ -314,6 +329,11 @@ class ChainApprover:
     """
 
     def __init__(self, *approvers: Approver):
+        for approver in approvers:
+            if not callable(getattr(approver, "review", None)):
+                raise ValueError(
+                    f"ChainApprover element must have a callable review, got {approver!r}"
+                )
         self._approvers = approvers
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:

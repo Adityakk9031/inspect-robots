@@ -54,6 +54,10 @@ Any venv workflow works. Activate it once (`source .venv/bin/activate`;
 an existing uv project, avoid `uv run inspect-robots`, which re-syncs to the
 lockfile and silently uninstalls what `uv pip install` just added.
 
+Native Windows is supported on a best-effort basis for work that needs no
+robot: simulation, API-model evals, logs and reports. Real robot control
+(ROS, V4L2 cameras, CAN) is Linux-only.
+
 ## Quickstart
 
 Install the plugin for your rig and set your defaults once:
@@ -488,7 +492,7 @@ and [`llms-full.txt`](https://docs.inspectrobots.org/llms-full.txt).
 > `uv lock` and commit the updated lockfile. CI installs with
 > `uv sync --locked` and fails with "the lockfile needs to be updated" if you
 > forget. Day-to-day conventions (PR-only `main`, the required `ci-ok` check,
-> one-click releases) are documented in [`CLAUDE.md`](CLAUDE.md).
+> one-click releases) are documented in [`AGENTS.md`](AGENTS.md).
 
 ```bash
 uv venv && uv pip install -e ".[dev]"

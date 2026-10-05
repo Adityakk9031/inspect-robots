@@ -490,6 +490,26 @@ def test_approver_introduced_non_finite_action_is_a_safety_abort() -> None:
     step.assert_not_called()
 
 
+def test_approver_introduced_wrong_dim_action_is_a_safety_abort() -> None:
+    class _WrongDimApprover:
+        def review(self, action: Action, store: dict[str, object]) -> Action:
+            del store
+            return replace(action, data=np.array([0.0]))
+
+    embodiment = CubePickEmbodiment()
+    step = Mock(wraps=embodiment.step)
+
+    with (
+        patch.object(embodiment, "step", step),
+        pytest.raises(
+            SafetyAbort, match="returned a 1-D action but embodiment 'cubepick' expects 2-D"
+        ),
+    ):
+        _run(ScriptedPolicy(), embodiment, approver=_WrongDimApprover())
+
+    step.assert_not_called()
+
+
 # --------------------------------------------------------------------------- #
 # Approval events: a modified action is recorded in the transcript.
 # --------------------------------------------------------------------------- #
@@ -912,3 +932,19 @@ def test_raising_server_url_property_does_not_mask_policy_failure() -> None:
     assert str(excinfo.value) == "base connection failure"
     assert excinfo.value.record is not None
     assert excinfo.value.record.error == "PolicyError: base connection failure"
+
+
+@pytest.mark.parametrize("invalid_steps", [0, -1, True, False, 2.5, "10"])
+def test_rollout_rejects_invalid_max_steps(invalid_steps: Any) -> None:
+    with pytest.raises(ValueError, match="max_steps must be an integer >= 1"):
+        rollout(
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            _SCENE,
+            max_steps=invalid_steps,
+            seed=0,
+            epoch=0,
+            controller=DefaultController(),
+            approver=AutoApprover(),
+            sink=NullSink(),
+        )

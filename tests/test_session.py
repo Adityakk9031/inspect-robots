@@ -32,6 +32,7 @@ from inspect_robots.session import (
     _NOTES_PROMPT,
     _PROMPT,
     OperatorSession,
+    _clip_tail,
     _stdin_read_bytes,
 )
 
@@ -2188,3 +2189,15 @@ def test_session_try_enter_footer_retains_plain_mode_when_termios_fails() -> Non
     assert session2._footer_active is False
     assert session2._pump_thread is None
     session2.end_trial()
+
+
+def test_clip_tail() -> None:
+    assert _clip_tail("hello", 10) == "hello"
+    assert _clip_tail("hello", 5) == "hello"
+    assert _clip_tail("hello", 3) == "llo"
+    assert _clip_tail("hello", 0) == ""
+    assert _clip_tail("hello", -1) == ""
+    assert _clip_tail("hello", -5) == ""
+    assert _clip_tail("", 5) == ""
+    assert _clip_tail("", 0) == ""
+    assert _clip_tail("", -2) == ""

@@ -668,6 +668,25 @@ def test_capture_records_anthropic_transport_error(tmp_path: Path) -> None:
     assert row["error"] == "anthropic offline"
 
 
+def test_retry_after_header_overrides_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("inspect_robots_agent._anthropic.time.sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"}, text="slow down")
+        return httpx.Response(200, json=_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    _client(handler, backoff_s=1.0).complete([_USER], [])
+
+    assert sleeps == [7.0]
+
+
 # -- parsing ---------------------------------------------------------------------
 
 
@@ -1555,3 +1574,30 @@ def test_act_marks_the_eviction_anchor_on_the_anthropic_wire() -> None:
     assert stub_blocks[-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in stub_blocks[0]
     assert b"cache_anchor" not in requests[-1].content
+
+
+def test_translate_tools_handles_missing_and_none_parameters() -> None:
+    from inspect_robots_agent._anthropic import _translate_tools
+
+    tools = [
+        {"type": "function", "function": {"name": "no_params"}},
+        {"type": "function", "function": {"name": "none_params", "parameters": None}},
+        {
+            "type": "function",
+            "function": {
+                "name": "with_params",
+                "description": "has params",
+                "parameters": {"type": "object", "properties": {"a": {"type": "string"}}},
+            },
+        },
+    ]
+    translated = _translate_tools(tools)
+    assert translated == [
+        {"name": "no_params", "description": "", "input_schema": {"type": "object"}},
+        {"name": "none_params", "description": "", "input_schema": {"type": "object"}},
+        {
+            "name": "with_params",
+            "description": "has params",
+            "input_schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+        },
+    ]
