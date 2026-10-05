@@ -101,6 +101,65 @@ def test_entrypoint_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "plugin_policy" in registered("policy")
 
 
+def test_autoload_opt_out_skips_entrypoints_but_keeps_builtins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = "optout-skip-probe-policy"
+
+    loaded: list[str] = []
+
+    class _FakeEP:
+        name = probe
+
+        def load(self) -> object:
+            # Record instead of raising: discovery turns load() exceptions into
+            # warnings, so a raising tripwire could never fail this test.
+            loaded.append(probe)
+            return ScriptedPolicy
+
+    def fake_entry_points(*, group: str) -> list[object]:
+        return [_FakeEP()] if group == "inspect_robots.policies" else []
+
+    monkeypatch.setattr(reg, "entry_points", fake_entry_points)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", False)
+    monkeypatch.setenv(reg.DISABLE_AUTOLOAD_ENV, "1")
+
+    try:
+        policies = registered("policy")
+    finally:
+        reg._FACTORIES["policy"].pop(probe, None)  # keep the shared registry clean
+    assert loaded == []  # discovery skipped: load() never called
+    assert probe not in policies
+    assert "scripted" in policies  # in-tree builtins still resolve
+
+
+def test_autoload_opt_out_is_not_latched(monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = "optout-latch-probe-policy"
+
+    class _FakeEP:
+        name = probe
+
+        def load(self) -> object:
+            return ScriptedPolicy
+
+    def fake_entry_points(*, group: str) -> list[object]:
+        return [_FakeEP()] if group == "inspect_robots.policies" else []
+
+    monkeypatch.setattr(reg, "entry_points", fake_entry_points)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", False)
+
+    try:
+        monkeypatch.setenv(reg.DISABLE_AUTOLOAD_ENV, "1")
+        assert probe not in registered("policy")
+
+        # Clearing the opt-out re-enables discovery in the same process: the
+        # skip must not have marked entry points as already loaded.
+        monkeypatch.delenv(reg.DISABLE_AUTOLOAD_ENV)
+        assert probe in registered("policy")
+    finally:
+        reg._FACTORIES["policy"].pop(probe, None)  # keep the shared registry clean
+
+
 def test_entrypoint_discovery_retries_after_a_failed_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8460,3 +8519,57 @@ def test_inspect_and_view_show_abstention_counts_beside_metrics(
     document = path.with_suffix(".html").read_text(encoding="utf-8")
     assert '<div class="stat-name">judged (3 abstained)</div>' in document
     assert '<div class="stat-name">other</div>' in document
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_vlm_preflight_rejection_exits_before_any_component_is_built(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    """Plan 0085: a rejected grader stops the CLI before the robot is touched."""
+    import inspect_robots._chatwire as chatwire
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(
+        chatwire, "_urllib_post", lambda url, headers, body: (400, b'{"error": "bad effort"}')
+    )
+
+    def no_components(*args: object, **kwargs: object) -> object:
+        raise AssertionError("components resolved despite a rejected preflight")
+
+    monkeypatch.setattr(cli, "_resolve_components", no_components)
+    log_dir = tmp_path / "logs"
+    head = (
+        _run_adhoc_args(log_dir)
+        if command == "run"
+        else ["eval-set", "cubepick-reach", "--log-dir", str(log_dir)]
+    )
+    with pytest.raises(SystemExit) as info:
+        main([*head, "--grader", "vlm", "-G", "model=judge", "-G", "effort=none"])
+
+    message = str(info.value.code)
+    assert message.startswith(
+        'grading preflight request failed with HTTP 400: {"error": "bad effort"}'
+    )
+    assert message.count("fix:") == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert not log_dir.exists()
+
+
+def test_eval_set_summary_shows_why_a_run_with_metrics_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="graded")
+    log = dataclasses.replace(
+        log,
+        status="error",
+        error="1 of 3 trial(s) ungraded: grader failed (HTTP 400)",
+        results=dataclasses.replace(log.results, metrics={"operator": 1.0}),
+    )
+    cli._print_eval_set_summary(False, [log], "logs")
+    out = capsys.readouterr().out
+    assert "operator=1  (1 of 3 trial(s) ungraded: grader failed (HTTP 400))" in out
