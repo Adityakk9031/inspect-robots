@@ -6,6 +6,7 @@ import dataclasses
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from inspect_robots.embodiment import EmbodimentInfo
@@ -79,6 +80,30 @@ def test_box_dim_and_bounds_validation() -> None:
 def test_box_rejects_inverted_bounds() -> None:
     with pytest.raises(ValueError, match="low must be elementwise"):
         Box(shape=(2,), low=np.array([0.0, 1.0]), high=np.array([1.0, 0.5]))
+
+
+@pytest.mark.parametrize(
+    ("low", "high", "expected_match"),
+    [
+        (np.array([np.nan]), np.array([1.0]), "Box low must not contain NaN"),
+        (np.array([0.0]), np.array([np.nan]), "Box high must not contain NaN"),
+        (np.array([np.nan]), None, "Box low must not contain NaN"),
+        (None, np.array([np.nan]), "Box high must not contain NaN"),
+        (
+            np.array([[0.0, np.nan], [1.0, 2.0]]),
+            np.full((2, 2), 5.0),
+            "Box low must not contain NaN",
+        ),
+    ],
+)
+def test_box_rejects_nan_bounds(
+    low: npt.NDArray[np.floating[Any]] | None,
+    high: npt.NDArray[np.floating[Any]] | None,
+    expected_match: str,
+) -> None:
+    shape = low.shape if low is not None else high.shape  # type: ignore[union-attr]
+    with pytest.raises(ValueError, match=expected_match):
+        Box(shape=shape, low=low, high=high)
 
 
 @pytest.mark.parametrize(

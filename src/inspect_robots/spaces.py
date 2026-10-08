@@ -100,10 +100,13 @@ class Box:
             if not isinstance(d, int) or isinstance(d, bool) or d <= 0:
                 raise ValueError(f"Box shape dimensions must be integers > 0; got {self.shape!r}")
         for name, bound in (("low", self.low), ("high", self.high)):
-            if bound is not None and tuple(bound.shape) != self.shape:
-                raise ValueError(
-                    f"Box {name} shape {tuple(bound.shape)} != space shape {self.shape}"
-                )
+            if bound is not None:
+                if tuple(bound.shape) != self.shape:
+                    raise ValueError(
+                        f"Box {name} shape {tuple(bound.shape)} != space shape {self.shape}"
+                    )
+                if np.issubdtype(bound.dtype, np.inexact) and bool(np.isnan(bound).any()):
+                    raise ValueError(f"Box {name} must not contain NaN")
         if self.low is not None and self.high is not None and bool(np.any(self.low > self.high)):
             raise ValueError("Box low must be elementwise <= high")
         labels = self.semantics.dim_labels if self.semantics is not None else None
