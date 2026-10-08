@@ -871,7 +871,7 @@ def _run_eval(
                     if actions_path is not None:
                         record.metadata["actions"] = actions_path
 
-                trial_metadatas.append(record.metadata)
+                trial_metadatas.append(_json_safe_scene_metadata(record.metadata))
                 termination_reasons.append(record.termination_reason)
                 operator_messages.append(
                     tuple(
