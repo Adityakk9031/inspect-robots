@@ -8,12 +8,14 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from inspect_robots import eval_set, read_eval_log
 from inspect_robots._html import render_html
 from inspect_robots._summarize import TrialTranscript, build_digest
 from inspect_robots.errors import EmbodimentFault, SafetyAbort
+from inspect_robots.eval import _json_safe_trial_metadata
 from inspect_robots.log import (
     SCHEMA_VERSION,
     EvalLog,
@@ -102,6 +104,30 @@ def test_json_safe_scene_metadata_filters_and_deep_copies() -> None:
         "rubric": "touch the cube",
         "nested": {"thresholds": [1, 2]},
     }
+    nested["thresholds"].append(3)
+    assert safe["nested"] == {"thresholds": [1, 2]}
+
+
+def test_json_safe_trial_metadata_filters_and_deep_copies() -> None:
+    """Retain JSON-safe values and NumPy scalars while omitting unencodable values."""
+    nested = {"thresholds": [1, 2]}
+    metadata = {
+        "valid_key": 42,
+        "nested": nested,
+        "contact_ids": {1, 2},
+        "adapter_object": object(),
+        "np_int": np.int64(7),
+        "np_float": np.float32(3.14),
+    }
+
+    safe = _json_safe_trial_metadata(metadata)
+
+    assert safe["valid_key"] == 42
+    assert safe["nested"] == {"thresholds": [1, 2]}
+    assert "contact_ids" not in safe
+    assert "adapter_object" not in safe
+    assert safe["np_int"] == 7
+    assert safe["np_float"] == pytest.approx(3.14, rel=1e-3)
     nested["thresholds"].append(3)
     assert safe["nested"] == {"thresholds": [1, 2]}
 
