@@ -587,8 +587,13 @@ def _run_eval(
     if callable(policy_bind_task):
         policy_bind_task(task_envelope)
 
+    if not task.scenes:
+        raise ConfigError(f"Task {task.name!r} contains no scenes to evaluate")
+
     epoch_spec = task.epoch_spec
     scorers = task.scorers
+    if not scorers:
+        raise ConfigError(f"Task {task.name!r} contains no scorers to evaluate")
     # Fail fast on an unknown/invalid epoch reducer, before any rollout runs.
     try:
         get_reducer(epoch_spec.reducer)

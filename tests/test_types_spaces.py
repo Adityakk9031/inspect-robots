@@ -479,6 +479,29 @@ def test_task_rejects_duplicate_scorer_names() -> None:
     assert [s.name for s in task.scorers] == ["reached_strict", "reached_loose"]
 
 
+def test_task_rejects_invalid_name_scenes_and_scorers() -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task
+
+    scene = Scene(id="s", instruction="reach")
+
+    with pytest.raises(ConfigError, match="Task name must be a non-empty string"):
+        Task(name="", scenes=[scene], scorer="success_at_end", max_steps=5)
+
+    with pytest.raises(ConfigError, match="Task name must be a non-empty string"):
+        Task(name="   ", scenes=[scene], scorer="success_at_end", max_steps=5)
+
+    with pytest.raises(ConfigError, match="scenes must contain at least one Scene"):
+        Task(name="t", scenes=[], scorer="success_at_end", max_steps=5)
+
+    with pytest.raises(ConfigError, match=r"scenes\[0\] must be a Scene instance"):
+        Task(name="t", scenes=["not_a_scene"], scorer="success_at_end", max_steps=5)  # type: ignore[list-item]
+
+    with pytest.raises(ConfigError, match="must declare at least one scorer"):
+        Task(name="t", scenes=[scene], scorer=[], max_steps=5)
+
+
 def test_operator_end_constant_is_public_vocabulary() -> None:
     import inspect_robots
     from inspect_robots.types import OPERATOR_END

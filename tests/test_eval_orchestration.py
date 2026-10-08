@@ -2299,3 +2299,25 @@ def test_eval_distinct_scorer_names_preserve_per_epoch_and_reduced_metrics(tmp_p
     assert log.samples[0].reduced["loose"] == 1.0
     assert log.results.metrics["strict"] == 0.0
     assert log.results.metrics["loose"] == 1.0
+
+
+def test_eval_rejects_task_without_scenes_or_scorers(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    task_no_scenes = MagicMock()
+    task_no_scenes.name = "no_scenes"
+    task_no_scenes.scenes = []
+    task_no_scenes.resolve_envelope.return_value = TaskEnvelope(name="no_scenes", max_steps=10)
+
+    with pytest.raises(ConfigError, match="contains no scenes to evaluate"):
+        eval(task_no_scenes, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    task_no_scorers = MagicMock()
+    task_no_scorers.name = "no_scorers"
+    task_no_scorers.scenes = [Scene(id="s", instruction="i")]
+    task_no_scorers.scorers = []
+    task_no_scorers.resolve_envelope.return_value = TaskEnvelope(name="no_scorers", max_steps=10)
+    task_no_scorers.epoch_spec = Epochs(count=1)
+
+    with pytest.raises(ConfigError, match="contains no scorers to evaluate"):
+        eval(task_no_scorers, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))

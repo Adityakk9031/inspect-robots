@@ -81,6 +81,10 @@ class Task:
     max_seconds: float | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ConfigError(f"Task name must be a non-empty string, got {self.name!r}")
+        if not self.scenes:
+            raise ConfigError(f"Task {self.name!r}: scenes must contain at least one Scene")
         if (self.max_steps is None) == (self.max_seconds is None):
             raise ConfigError(
                 f"Task {self.name!r}: declare exactly one of max_steps or max_seconds"
@@ -103,7 +107,12 @@ class Task:
         # "{scene.id}-e{epoch}", which FrameStore turns into a filename), so a
         # duplicate would silently overwrite another trial's frames.
         seen: set[str] = set()
-        for scene in self.scenes:
+        for index, scene in enumerate(self.scenes):
+            if not isinstance(scene, Scene):
+                raise ConfigError(
+                    f"Task {self.name!r}: scenes[{index}] must be a Scene instance, "
+                    f"got {type(scene).__name__}"
+                )
             if scene.id in seen:
                 raise ConfigError(f"Task {self.name!r}: duplicate scene id {scene.id!r}")
             seen.add(scene.id)
@@ -127,6 +136,8 @@ class Task:
                 out.append(cast(Scorer, resolve("scorer", entry)))
             else:
                 out.append(entry)
+        if not out:
+            raise ConfigError(f"Task {self.name!r}: must declare at least one scorer")
         seen_names: set[str] = set()
         for s in out:
             if s.name in seen_names:
